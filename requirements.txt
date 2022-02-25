@@ -1,3 +1,5 @@
 numpy
 matplotlib
-pycro
+pycromanager
+docstring-inheritance
+git+https://github.com/ilyasdc/pycro-manager@iterable
