@@ -3,7 +3,6 @@
 This simple code allows to quickly load and process images acquired from micro-manager
 Under the hood it uses pycromanager [https://github.com/micro-manager/pycro-manager] 
 
-
 # How to install 
 Clone the repository: 
 
@@ -32,7 +31,13 @@ import mmpyreader
 There is an introductive notebook on how to use the library: `tutorial.ipynb`
 
 ## Mandatory 
-`pycro-manager` library acts as a bridge between Micro-Manager and python. Therefore it requires a running micro-manager version in the background and the server mode activated  (cf: https://pycro-manager.readthedocs.io/en/latest/setup.html ). If you receive an error about ZMQ like:  
+`pycro-manager` library acts as a bridge between Micro-Manager and python. Therefore it requires a running micro-manager version in the background and the server mode activated  (cf: https://pycro-manager.readthedocs.io/en/latest/setup.html ).
+
+In summary: 
+1 .Download the lastest version of micro-manager 2.0 (https://download.micro-manager.org/nightly/2.0/Windows/)
+2. Run Micro-Manager, select tools-options, and check the box that says Run server on port 4827 (you only need to do this once)
+
+If you receive an error about ZMQ like:  
 
 ```python
 TimeoutError: Socket timed out after 500 milliseconds. Is Micro-Manager running and is the ZMQ server on 4827 option enabled?
