@@ -97,7 +97,7 @@ class MMpyreader():
     def __init__(self) -> None:
         # From pycromanager's documentation 
         # https://pycro-manager.readthedocs.io/en/latest/mm_java_apis.html  
-        self.bridge = Bridge(convert_camel_case=False,debug=False)
+        self.bridge = Bridge(convert_camel_case=False,iterate=True,debug=False)
         self.mm = self.bridge.get_studio()
 
     def load_folder(self,folder: str,virtual: bool = True) -> None:

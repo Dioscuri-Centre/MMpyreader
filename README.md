@@ -15,7 +15,7 @@ Then install
 cd MMpyreader && pip install .
 ```
 
-You also need to clone and install my pycro-manager clone  where I made a little change (this will probably be merged later-on) : 
+You also need to install pycro-manager (my change has been merged)
 
 ```bash 
 pip install -r requirements.txt
