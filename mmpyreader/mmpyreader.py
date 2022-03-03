@@ -34,7 +34,8 @@ class MMstack():
         h,w = img.getHeight(),img.getWidth()
         img_pix = img.getRawPixels().reshape(h,w) #returns a numpy array
         img_metadata = img.getMetadata() 
-        return img_pix,img_metadata
+        img._close()
+        return img_pix,img_metadata 
 
     def str_to_idx(self,dim = None, val = None):
         if dim == 'C': 
