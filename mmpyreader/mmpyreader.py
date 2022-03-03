@@ -21,7 +21,7 @@ class MMstack():
         self.positions_names = [p.getLabel() for p in self.metadata.getStagePositionList()]
         self.dims = self.__get_dims()
 
-    def get_img(self,P:int = None,T:int = None, C:int = None, Z:int = None):
+    def get_img(self,P:int = None,T:int = None, C:int = None, Z:int = None,unpack=True):
         '''Get image (with metadata!) at specified position, arguments 
            order don't matter since those are passed by a dict '''
         for dim in self.dims.keys(): # go through all dimensions and check if available
@@ -31,6 +31,8 @@ class MMstack():
         coords = self.builder.z(Z).time(T).channel(C).stagePosition(P).build()
         img = self.stack.getImage(coords) 
         assert img != None, 'Could not get image' 
+        if not unpack:
+            return img
         h,w = img.getHeight(),img.getWidth()
         img_pix = img.getRawPixels().reshape(h,w) #returns a numpy array
         img_metadata = img.getMetadata() 
