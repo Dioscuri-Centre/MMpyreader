@@ -11,6 +11,11 @@ import subprocess
 
 
 class MMstack():
+    # convert MM channel names to short notation 
+    ch_pretty = dict(channel='C',position='P',time='T',z='Z') # we choose this order 
+    # the reverse mapping 
+    ch_mm = dict(zip(ch_pretty.values(),ch_pretty.keys())) 
+
     def __init__(self,mm,stack):
         self.mm = mm
         self.stack = stack
@@ -24,12 +29,16 @@ class MMstack():
     def get_img(self,P:int = None,T:int = None, C:int = None, Z:int = None,unpack=True):
         '''Get image (with metadata!) at specified position, arguments 
            order don't matter since those are passed by a dict '''
-        for dim in self.dims.keys(): # go through all dimensions and check if available
-            assert locals()[dim] < self.dims[dim] ,\
-                  f"Required {dim} ({locals()[dim]}) exceeds max ({self.dims[dim]})"
+        coords = dict(P=None,T=None,C=None,Z=None)
+        for dim,max in self.dims.items(): # go through all dimensions and check if available
+            coords[dim] = self.str_to_idx(dim=dim,val=locals()[dim])
+            assert coords[dim] < max ,\
+                  f"Required {dim} ({coords[dim]}) exceeds max ({max})"
+
         # TODO: check that all dimensions exist
+        P,T,C,Z = coords.values()
         coords = self.builder.z(Z).time(T).channel(C).stagePosition(P).build()
-        img = self.stack.getImage(coords) 
+        img = self.stack.getImage(coords)
         assert img != None, 'Could not get image' 
         if not unpack:
             return img
@@ -40,17 +49,45 @@ class MMstack():
         return img_pix,img_metadata 
 
     def str_to_idx(self,dim = None, val = None):
-        if dim == 'C': 
+        if type(val) == int: 
+            return val
+        elif dim == 'C': 
             assert(val in self.channels), f"{val} not in {self.channels}"
             return self.channels.index(val) 
-        if dim == 'P':
+        elif dim == 'P':
             assert(val in self.positions_names), f"{val} not in {self.positions_names}"
             return self.positions_names.index(val) 
         else:
             raise Exception(f'Dimension {dim} cannot be converted to an index')
 
-    def get_substack(self,P = None,T = None, C = None, Z = None,metadata = None):
+    def get_substack(self,P = None,T = None, C = None, Z = None, unpack=True):
         ''''''
+        
+        coords = self.gen_coords(P = P, T = T, C = C, Z = Z)
+        coords_prod = list(product(*coords)) #cartesian product
+        dims_after = list(map(len,coords))
+        h,w = self.get_img(0, 0, 0, 0)[0].shape #assuming all images are of the same size
+        dims_substack = [np.prod(dims_after),h,w] 
+        imgs = np.empty(dims_substack) # array is flattened 
+        imgs = []*np.prod(dims_after)
+        metadata = []
+        # assert len(coords) == np.prod(dims_substack[:-2]),\
+        #      f" problem with dimensions {len(coords)} != {np.prod(dims_substack[:-2])}"
+        for i,coord in enumerate(coords_prod):
+            coord_dict = dict(zip(self.dims.keys(),coord))
+            img = self.get_img(**coord_dict,unpack=unpack)
+            if unpack: 
+                img,metadatum = img 
+                metadata.append(metadatum)    
+            imgs.append(img)
+
+        if unpack: 
+            imgs = np.array(imgs).reshape(dims_after+[h,w])
+            return imgs, metadata
+        else: 
+            return imgs
+
+    def gen_coords(self,P = None,T = None, C = None, Z = None):
         coords = [] # we will generate a list of indexes (dicts) to retrieve
         for dim in self.dims.keys(): # go through all dimensions and check if available
             val = locals()[dim]
@@ -65,32 +102,130 @@ class MMstack():
                     coords.append(val)
                 elif set(list(map(type,val))) == {str} :
                     coords.append(list(map(lambda x: self.str_to_idx(dim,x),val)))
+        return coords 
 
-        dims_after = list(map(len,coords))
-        coords = list(product(*coords)) #cartesian product
-        h,w = self.get_img(0, 0, 0, 0)[0].shape #assuming all images are of the same size
-        dims_substack = [len(coords),h,w] 
-        imgs = np.empty(dims_substack) # array is flattened 
-        metadata = []
-        assert len(coords) == np.prod(dims_substack[:-2]),\
-             f" problem with dimensions {len(coords)} != np.prod(dims_substack[:-2])"
-        for i,coord in enumerate(coords):
-            coord_dict = {dim:val for dim,val in zip(self.dims.keys(),coord)}
-            img, metadatum = self.get_img(**coord_dict)
-            imgs[i] = img
-            metadata.append(metadatum)    
-        imgs = imgs.reshape(dims_after+[h,w]) 
-        return imgs,metadata
+    def save_substack(self,folder,P = None,T = None, C = None, Z = None): # same signature as get_substack
+        '''Make a real stack object from the coordinates '''
+        coords = self.gen_coords(P = P,T = T, C = C, Z = Z)
+        Cl,Pl,Tl,Zl = coords  #keep list of positions 
+        coords_prod = list(product(*coords)) #cartesian product
+
+        #store = self.mm.data().createRAMDatastore()
+        store = self.mm.data().createMultipageTIFFDatastore(folder,True,True)
+        smb = self.mm.data().getSummaryMetadataBuilder()
+        ndims = self.builder.z(len(Zl)).time(len(Tl)).channel(len(Cl)).stagePosition(len(Pl)).build()
+        sm = smb.intendedDimensions(ndims).build();   
+        store.setSummaryMetadata(sm)
+       
+        for coord in coords_prod:
+            # old coordinates
+            Co,Po,To,Zo  = coord 
+            mmcord = self.builder.z(Zo).time(To).channel(Co).stagePosition(Po).build()
+            img = self.stack.getImage(mmcord)
+            # new coordinates 
+            Pn,Tn,Cn,Zn = Pl.index(Po),Tl.index(To),Cl.index(Co),Zl.index(Zo)
+            #print(f"{[Po,To,Co,Zo]}--->{[Pn,Tn,Cn,Zn]}") 
+            mmcord = self.builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
+            img = img.copyAtCoords(mmcord)
+            store.putImage(img)
+        store.freeze()
+        store.close()
+        return store 
+
+    def save_substack_fancy(self,folder,P = None,T = None, C = None, Z = None,linkedcoord = None): # same signature as get_substack
+        ''' Use some "fancy indexing" so that coordinates of same length are iterated at the same time (zipped)
+            Dims will be 4 - # of linked coord + 1 '''
+        if linkedcoord: 
+            for coord in linkedcoord: 
+                assert coord in ['P','T','C','Z'] 
+
+        coords = self.gen_coords(P = P,T = T, C = C, Z = Z)
+        #cdict = { cname:coord for cname,coord in zip(list((self.dims).keys()),coords) }
+        cdict = dict(zip(self.dims,coords))
+        Cl,Pl,Tl,Zl = coords  #keep list of positions
+        # we will reduce the dimensionality  
+        coords_prod = list(product(*coords)) #cartesian product
+
+        if linkedcoord: 
+            # check all coords are OK 
+            assert type(linkedcoord) == str
+            # check all coords have same len  
+            assert all([cdict[cname] == cdict[linkedcoord[0]] for cname in linkedcoord])
+            idxs = [list(cdict.keys()).index(cname) for cname in linkedcoord] 
+            valid_coords = list(zip( *[cdict[cname] for cname in linkedcoord] ))
+            coords_filtered = []
+            for coord in coords_prod:
+                # /!\ coords are tuples, cannot compare list to tuple
+                relevant_coords =  tuple(coord[idx] for idx in idxs)
+                if relevant_coords in valid_coords:
+                    coords_filtered.append(coord)
+
+            coords_prod = coords_filtered 
+        #store = self.mm.data().createRAMDatastore()
+        store = self.mm.data().createMultipageTIFFDatastore(folder,True,True)
+        smb = self.mm.data().getSummaryMetadataBuilder()
+        # this needs to be changed 
+        # 
+        builder = self.builder
+        relevant_axis = []
+        if linkedcoord: 
+            # We assume axes have some priority, this could be a parameter  
+            ax_priority = ['P','T','C','Z'] 
+            ax_priority.reverse()
+            map_ax_names  = dict( C = 'channel', Z = 'z', P = 'stagePosition', T = 'time')
+            for ax in ax_priority:
+                if (ax in linkedcoord) and (len(linkedcoord) > 1): 
+                    linkedcoord = linkedcoord.replace(ax,'')
+                    getattr(builder,map_ax_names[ax])(0)
+                else: 
+                    print(ax,len(cdict[ax]),"   ")
+                    getattr(builder,map_ax_names[ax])(len(cdict[ax]))
+                    relevant_axis.append(ax)
+        else: 
+            builder = self.builder.z(len(Zl)).time(len(Tl)).channel(len(Cl)).stagePosition(len(Pl))
+
+        ndims = builder.build() 
+        sm = smb.intendedDimensions(ndims).build();   
+        #store.setSummaryMetadata(sm)
+
+        #TODO: need to finish this 
+        for coord in coords_prod:
+            # old coordinates
+            oldcoord = dict(zip(self.dims,coord))
+            Co,Po,To,Zo  = coord 
+            #mmcord = self.builder.z(Zo).time(To).channel(Co).stagePosition(Po).build()
+            #img = self.stack.getImage(mmcord)
+            img = self.get_img(**oldcoord,unpack=False)
+            # new coordinates 
+            #Pn,Tn,Cn,Zn = Pl.index(Po),Tl.index(To),Cl.index(Co),Zl.index(Zo)
+            #mmcord = self.builder
+            newcoord = {}
+            for ax,val in zip(self.dims.keys(),coord):
+                if ax in relevant_axis: 
+                    newcoord[ax] = cdict[ax].index(val)
+                else: 
+                    #builder.removeAxis(self.ch_mm[ax])
+                    newcoord[ax] = 0
+                getattr(builder,map_ax_names[ax])(newcoord[ax])
+
+            print(f"{oldcoord }--->{ newcoord }") 
+            #mmcord.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
+            img = img.copyAtCoords(builder.build())
+            store.putImage(img)
+        store.freeze()
+        store.close()
+        #return store 
 
     def __get_dims(self): # return all dimensions  
         ''' Nicely output dimensions '''
         # Get axes names
-        axes = self.metadata.getIntendedDimensions().getAxes()
+        axes = self.metadata.getOrderedAxes()
+        axes.reverse()
+
         # Get number of element
         axnb = list(self.stack.getNextIndex(ax) for ax in axes)
         # rename channels with compact versions
-        ch_pretty = dict(channel='C',position='P',time='T',z='Z')
-        axes = [ch_pretty[ax] for ax in axes]
+        axes = [self.ch_pretty[ax] for ax in axes]
         ch_dict = dict(zip(axes,axnb))
         # Output the result 
         print(' x '.join([f"{v}{str(k)}" for k,v in ch_dict.items()]))
@@ -106,9 +241,6 @@ class MMpyreader():
     def load_folder(self,folder: str,virtual: bool = True) -> None:
         assert path.isdir(folder), f"{folder} doesn't exist"
         assert len(glob(path.join(folder,'*.ome.tif'))) >0, f"No ome.tif file in {folder}"
-        # self.wine_folder = subprocess.check_output(f"winepath -w {folder}".split(' ')).decode
-        # ('UTF-8') # need to convert wine to unix path ... 
-        # self.wine_folder = folder.replace('/','Z:/',1)
         stack = self.mm.data().loadData(folder,virtual)
         return MMstack(self.mm,stack)
 
