@@ -8,7 +8,7 @@ from os import path
 from glob import glob
 from numpy import array
 import subprocess 
-
+import tqdm
 
 class MMstack():
     # convert MM channel names to short notation 
@@ -26,7 +26,7 @@ class MMstack():
         self.positions_names = [p.getLabel() for p in self.metadata.getStagePositionList()]
         self.dims = self.__get_dims()
 
-    def get_img(self,P:int = None,T:int = None, C:int = None, Z:int = None,unpack=True):
+    def get_img(self,P:int = None,T:int = None, C:int = None, Z:int = None,unpack=True,ignore_err=False):
         '''Get image (with metadata!) at specified position, arguments 
            order don't matter since those are passed by a dict '''
         coords = dict(P=None,T=None,C=None,Z=None)
@@ -39,7 +39,9 @@ class MMstack():
         P,T,C,Z = coords.values()
         coords = self.builder.z(Z).time(T).channel(C).stagePosition(P).build()
         img = self.stack.getImage(coords)
-        assert img != None, 'Could not get image' 
+        if img == None: 
+            if ignore_err: return img
+            else : raise Exception('Could not get image')
         if not unpack:
             return img
         h,w = img.getHeight(),img.getWidth()
@@ -60,32 +62,92 @@ class MMstack():
         else:
             raise Exception(f'Dimension {dim} cannot be converted to an index')
 
-    def get_substack(self,P = None,T = None, C = None, Z = None, unpack=True):
+
+    def gen_substack(self,P = None,T = None, C = None, Z = None, unpack=True,ignore_err=False):
+        ''''''
+        coords = self.gen_coords(P = P, T = T, C = C, Z = Z)
+        coords_prod = list(product(*coords)) #cartesian product        
+        h,w = self.get_img(0, 0, 0, 0)[0].shape #assuming all images are of the same size
+        n_empty = 0
+        # assert len(coords) == np.prod(dims_substack[:-2]),\
+        #      f" problem with dimensions {len(coords)} != {np.prod(dims_substack[:-2])}"
+        for i,coord in enumerate(coords_prod):
+            coord_dict = dict(zip(self.dims.keys(),coord))
+            img = self.get_img(**coord_dict,unpack=unpack,ignore_err=ignore_err)
+            if img == None:
+                print(f'found empty image at coords {coord}')
+                n_empty +=1
+                img = (np.zeros((h,w),dtype=np.uint16),None)
+            if unpack:
+                img,metadatum = img 
+                yield img,metadatum
+            else: 
+                yield img
+
+    def get_substack(self,P = None,T = None, C = None, Z = None, unpack=True,ignore_err=False):
         ''''''
         
         coords = self.gen_coords(P = P, T = T, C = C, Z = Z)
         coords_prod = list(product(*coords)) #cartesian product
         dims_after = list(map(len,coords))
         h,w = self.get_img(0, 0, 0, 0)[0].shape #assuming all images are of the same size
-        dims_substack = [np.prod(dims_after),h,w] 
-        imgs = np.empty(dims_substack) # array is flattened 
-        imgs = []*np.prod(dims_after)
-        metadata = []
-        # assert len(coords) == np.prod(dims_substack[:-2]),\
-        #      f" problem with dimensions {len(coords)} != {np.prod(dims_substack[:-2])}"
-        for i,coord in enumerate(coords_prod):
-            coord_dict = dict(zip(self.dims.keys(),coord))
-            img = self.get_img(**coord_dict,unpack=unpack)
-            if unpack: 
-                img,metadatum = img 
-                metadata.append(metadatum)    
-            imgs.append(img)
+        dims_substack = [np.prod(dims_after),h,w]
+        #imgs = np.empty(dims_substack) # array is flattened 
+        #imgs = []*np.prod(dims_after)
+        # metadata = []
+        # n_empty = 0
+        # # assert len(coords) == np.prod(dims_substack[:-2]),\
+        # #      f" problem with dimensions {len(coords)} != {np.prod(dims_substack[:-2])}"
+        # for i,coord in enumerate(coords_prod):
+        #     coord_dict = dict(zip(self.dims.keys(),coord))
+        #     img = self.get_img(**coord_dict,unpack=unpack,ignore_err=ignore_err)
+        #     if img == None:
+        #         print(f'found empty image at coords {coord}')
+        #         n_empty +=1
+        #         img = (np.zeros((h,w),dtype=np.uint16),None)
+        #     if unpack: 
+        #         img,metadatum = img 
+        #         metadata.append(metadatum)
+        #     imgs.append(img)
+        imgs = list(self.gen_substack(P = P, T = T, C = C, Z = Z, unpack=unpack,ignore_err=ignore_err))
 
         if unpack: 
+            imgs,metadata = [x[0] for x in imgs],[x[1] for x in imgs]
             imgs = np.array(imgs).reshape(dims_after+[h,w])
+            metadata = np.array(metadata).reshape(dims_after)
             return imgs, metadata
         else: 
+            imgs = np.array(imgs).reshape(dims_after)
             return imgs
+
+    def get_substack_coords(self,P = None,T = None, C = None, Z = None, unpack=True,ignore_err=False):
+        '''Just to get the coords'''
+        coords = self.gen_coords(P = P, T = T, C = C, Z = Z)
+        coords_prod = list(product(*coords)) #cartesian product
+        dims_after = list(map(len,coords))
+        coords_dict = [dict(zip(self.dims.keys(),x)) for x in coords_prod] 
+        coords_dict = np.array(coords_dict).reshape(*dims_after)
+        return coords_dict
+
+    def get_metadata(self,P = None,T = None, C = None, Z = None,ignore_err=False):
+        ''''''
+     
+        coords = self.gen_coords(P = P, T = T, C = C, Z = Z)
+        coords_prod = list(product(*coords)) #cartesian product
+        dims_after = list(map(len,coords))
+        h,w = self.get_img(0, 0, 0, 0)[0].shape #assuming all images are of the same size
+        dims_substack = [np.prod(dims_after),h,w] 
+        metadata = []
+        n_empty = 0
+        for i,coord in tqdm.tqdm(enumerate(coords_prod)):
+            coord_dict = dict(zip(self.dims.keys(),coord))
+            img = self.get_img(**coord_dict,unpack=False,ignore_err=ignore_err)
+            metadatum = img.getMetadata() 
+            metadata.append(metadatum)    
+            img._close()
+
+        metadata = np.array(metadata).reshape(dims_after)        
+        return metadata
 
     def gen_coords(self,P = None,T = None, C = None, Z = None):
         coords = [] # we will generate a list of indexes (dicts) to retrieve
@@ -193,7 +255,8 @@ class MMstack():
             # old coordinates
             oldcoord = dict(zip(self.dims,coord))
             Co,Po,To,Zo  = coord 
-            #mmcord = self.builder.z(Zo).time(To).channel(Co).stagePosition(Po).build()
+            #mmcord = self.builder.z(Zo).time(To).
+            # (Co).stagePosition(Po).build()
             #img = self.stack.getImage(mmcord)
             img = self.get_img(**oldcoord,unpack=False)
             # new coordinates 
@@ -239,10 +302,18 @@ class MMpyreader():
         self.mm = self.bridge.get_studio()
 
     def load_folder(self,folder: str,virtual: bool = True) -> None:
+        if folder.endswith('ome.tif'): 
+            folder = path.dirname(folder)
         assert path.isdir(folder), f"{folder} doesn't exist"
         assert len(glob(path.join(folder,'*.ome.tif'))) >0, f"No ome.tif file in {folder}"
         stack = self.mm.data().loadData(folder,virtual)
         return MMstack(self.mm,stack)
+
+    def __enter__(self):
+        return self 
+
+    def __exit__(self, type, value, traceback):
+        self.bridge.close()
 
 if __name__ == '__main__':
     # Some tests 
@@ -250,14 +321,20 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm 
     mpl.rc('image', cmap='gray') # set default cmap as gray
-    reader = MMpyreader()
-    stack = reader.load_folder("/mnt/dioscuri-nas/Ola/2021.11.19_colonies2/_1",True)
-    stack_meta = stack.metadata 
-    # Get a single image
-    img,img_meta = stack.get_img(C=1,P=1,T=3,Z=1)
-    # Get a substack, if an element is not provided it is assumed you want 
-    # all elements, /!\ this is 0 indexed
-    # 4 elements, channel 0/1 and pos 1/2 
-    substack,substack_meta = stack.get_substack(C=[0,1],P=[1,2],T=1,Z=1)
-    # Get all zstack 
-    substack,substack_meta = stack.get_substack(C=1,P=1,T=1)
+    with MMpyreader() as reader:
+        stack = reader.load_folder("/mnt/dioscuri-nas/Ola/2021.11.19_colonies2/_1",True)
+        stack_meta = stack.metadata 
+        # Get a single image
+        img,img_meta = stack.get_img(C=1,P=1,T=3,Z=1)
+        # Get a substack, if an element is not provided it is assumed you want 
+        # all elements, /!\ this is 0 indexed
+        # 4 elements, channel 0/1 and pos 1/2 
+        substack,substack_meta = stack.get_substack(C=[0,1],P=[1,2],T=1,Z=1)
+        # Get all zstack 
+        substack,substack_meta = stack.get_substack(C=1,P=1,T=1)
+        
+        # get multiple images:
+        for i in range(50): 
+            stack.get_img(C=1,P=1,T=i,Z=1)
+            print(i)
+# %%
