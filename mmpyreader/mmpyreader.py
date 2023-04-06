@@ -8,7 +8,20 @@ from os import path
 from glob import glob
 from numpy import array
 import subprocess 
-import tqdm
+from tqdm.auto import tqdm
+import os 
+
+def dict_product(dicts):
+    """
+    from stackoverflow, takes a dictionary ang generates the cartesian product of its values as dictionnaries
+    # such that one dict has the keys and the values of one such element of the product
+    >>> list(dict_product(dict(number=[1,2], character='ab')))
+    [{'character': 'a', 'number': 1},
+     {'character': 'a', 'number': 2},
+     {'character': 'b', 'number': 1},
+     {'character': 'b', 'number': 2}]
+    """
+    return list((dict(zip(dicts, x)) for x in product(*dicts.values())))
 
 class MMstack():
     # convert MM channel names to short notation 
@@ -16,8 +29,9 @@ class MMstack():
     # the reverse mapping 
     ch_mm = dict(zip(ch_pretty.values(),ch_pretty.keys())) 
 
-    def __init__(self,mm,stack):
-        self.mm = mm
+    def __init__(self,bridge,stack):
+        self.bridge = bridge
+        self.mm = bridge.get_studio()
         self.stack = stack
         self.builder = self.mm.data().getCoordsBuilder()
         self.metadata = self.stack.getSummaryMetadata()
@@ -92,23 +106,6 @@ class MMstack():
         dims_after = list(map(len,coords))
         h,w = self.get_img(0, 0, 0, 0)[0].shape #assuming all images are of the same size
         dims_substack = [np.prod(dims_after),h,w]
-        #imgs = np.empty(dims_substack) # array is flattened 
-        #imgs = []*np.prod(dims_after)
-        # metadata = []
-        # n_empty = 0
-        # # assert len(coords) == np.prod(dims_substack[:-2]),\
-        # #      f" problem with dimensions {len(coords)} != {np.prod(dims_substack[:-2])}"
-        # for i,coord in enumerate(coords_prod):
-        #     coord_dict = dict(zip(self.dims.keys(),coord))
-        #     img = self.get_img(**coord_dict,unpack=unpack,ignore_err=ignore_err)
-        #     if img == None:
-        #         print(f'found empty image at coords {coord}')
-        #         n_empty +=1
-        #         img = (np.zeros((h,w),dtype=np.uint16),None)
-        #     if unpack: 
-        #         img,metadatum = img 
-        #         metadata.append(metadatum)
-        #     imgs.append(img)
         imgs = list(self.gen_substack(P = P, T = T, C = C, Z = Z, unpack=unpack,ignore_err=ignore_err))
 
         if unpack: 
@@ -131,15 +128,17 @@ class MMstack():
 
     def get_metadata(self,P = None,T = None, C = None, Z = None,ignore_err=False):
         ''''''
-     
-        coords = self.gen_coords(P = P, T = T, C = C, Z = Z)
-        coords_prod = list(product(*coords)) #cartesian product
-        dims_after = list(map(len,coords))
+        cdict = self.gen_coords(P = P,T = T, C = C, Z = Z)
+        Tl,Pl,Zl,Cl = cdict['T'], cdict['P'], cdict['Z'], cdict['C'] #keep list of positions
+        coords_prod = dict_product(cdict)
+        # coords = self.gen_coords(P = P, T = T, C = C, Z = Z)
+        # coords_prod = list(product(*coords)) #cartesian product
+        dims_after = list(map(len,cdict.values()))
         h,w = self.get_img(0, 0, 0, 0)[0].shape #assuming all images are of the same size
         dims_substack = [np.prod(dims_after),h,w] 
         metadata = []
         n_empty = 0
-        for i,coord in tqdm.tqdm(enumerate(coords_prod)):
+        for i,coord in tqdm(enumerate(coords_prod)):
             coord_dict = dict(zip(self.dims.keys(),coord))
             img = self.get_img(**coord_dict,unpack=False,ignore_err=ignore_err)
             metadatum = img.getMetadata() 
@@ -153,6 +152,8 @@ class MMstack():
         coords = [] # we will generate a list of indexes (dicts) to retrieve
         for dim in self.dims.keys(): # go through all dimensions and check if available
             val = locals()[dim]
+            if type(val) == np.ndarray:
+                val = val.tolist()
             if val == None: #if no value, we get the total number of elts
                 coords.append(list(range(self.dims[dim])))
             elif type(val) == int: 
@@ -164,35 +165,78 @@ class MMstack():
                     coords.append(val)
                 elif set(list(map(type,val))) == {str} :
                     coords.append(list(map(lambda x: self.str_to_idx(dim,x),val)))
-        return coords 
+        return dict(zip(self.dims.keys(),coords))
 
-    def save_substack(self,folder,P = None,T = None, C = None, Z = None): # same signature as get_substack
+    def save_substack(self,folder,P = None,T = None, C = None, Z = None,split_pos=False,separate_meta=False,remove_z=False): # same signature as get_substack
         '''Make a real stack object from the coordinates '''
-        coords = self.gen_coords(P = P,T = T, C = C, Z = Z)
-        Cl,Pl,Tl,Zl = coords  #keep list of positions 
-        coords_prod = list(product(*coords)) #cartesian product
-
-        #store = self.mm.data().createRAMDatastore()
-        store = self.mm.data().createMultipageTIFFDatastore(folder,True,True)
-        smb = self.mm.data().getSummaryMetadataBuilder()
+        cdict = self.gen_coords(P = P,T = T, C = C, Z = Z)
+        Tl,Pl,Zl,Cl = cdict['T'], cdict['P'], cdict['Z'], cdict['C'] #keep list of positions
+        coords_prod = dict_product(cdict) #cartesian product
+        #coords_prod = list(product(*cdict.values())) 
+        
+        store = self.mm.data().createMultipageTIFFDatastore(folder,separate_meta,split_pos)
+        smb = self.metadata.copyBuilder()
         ndims = self.builder.z(len(Zl)).time(len(Tl)).channel(len(Cl)).stagePosition(len(Pl)).build()
-        sm = smb.intendedDimensions(ndims).build();   
-        store.setSummaryMetadata(sm)
-       
-        for coord in coords_prod:
+        smb = smb.intendedDimensions(ndims)
+        
+        bridge = self.bridge 
+        # Set positions
+        orig_pos = self.positions
+        arraylist_pos = bridge.construct_java_object('java.util.ArrayList')
+        for p in Pl:
+            pos = orig_pos[p]
+            if remove_z:
+                zpos = pos.get('ZDrive')
+                zpos.set1DPosition('ZDrive',0.0)
+            arraylist_pos.add(pos)
+        smb = smb.stagePositions(arraylist_pos)
+
+        # Set channels
+        arraylist_channels = bridge.construct_java_object('java.util.ArrayList')
+        for c in Cl:
+            arraylist_channels.add(self.channels[c])
+        smb = smb.channelNames(arraylist_channels)
+
+
+        store.setSummaryMetadata(smb.build())
+        
+        for coord in tqdm(coords_prod):
             # old coordinates
-            Co,Po,To,Zo  = coord 
+            #cdict = dict(zip(self.dims.keys(),coord))
+            To,Po,Zo,Co  = coord['T'], coord['P'],coord['Z'],coord['C'],
+            # new coordinates
+            Tn,Pn,Zn,Cn = Tl.index(To),Pl.index(Po),Zl.index(Zo),Cl.index(Co)
+            #print(f"{[Po,To,Co,Zo]}--->{[Pn,Tn,Cn,Zn]}")
             mmcord = self.builder.z(Zo).time(To).channel(Co).stagePosition(Po).build()
-            img = self.stack.getImage(mmcord)
-            # new coordinates 
-            Pn,Tn,Cn,Zn = Pl.index(Po),Tl.index(To),Cl.index(Co),Zl.index(Zo)
-            #print(f"{[Po,To,Co,Zo]}--->{[Pn,Tn,Cn,Zn]}") 
-            mmcord = self.builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
-            img = img.copyAtCoords(mmcord)
-            store.putImage(img)
+            img = self.get_img(C=Co,P=Po,T=To,Z=Zo,unpack=False)
+            #img = self.stack.getImage(mmcord)
+            mmcordn = self.builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
+            imgn = img.copyAtCoords(mmcordn)
+            img._close()
+            if remove_z:
+                meta = imgn.getMetadata()
+                meta_new = meta.copy()
+                meta_new.zPositionUm(0.0)
+                meta_new = meta_new.build()
+                imgn2 = imgn.copyWithMetadata(meta_new)
+                imgn._close()
+                imgn = imgn2
+            store.putImage(imgn)
+            imgn._close()
+        newstack = type(self)(self.bridge,store) 
         store.freeze()
         store.close()
-        return store 
+        return newstack 
+
+    def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,):
+        unique_wells = find_unique_wells(self)
+        if(len(list(unique_wells))) == len(self.positions):
+            print('It doesn\'t seem that your data contains separate wells data')
+            return
+        for well,pos in unique_wells.items():
+            out_folder = os.path.join(root_folder,'well_{}'.format(well))
+            print('{} folder created.'.format(out_folder))
+            self.save_substack(P=pos,T = T, C = C, Z = Z,folder=out_folder)
 
     def save_substack_fancy(self,folder,P = None,T = None, C = None, Z = None,linkedcoord = None): # same signature as get_substack
         ''' Use some "fancy indexing" so that coordinates of same length are iterated at the same time (zipped)
@@ -307,7 +351,7 @@ class MMpyreader():
         assert path.isdir(folder), f"{folder} doesn't exist"
         assert len(glob(path.join(folder,'*.ome.tif'))) >0, f"No ome.tif file in {folder}"
         stack = self.mm.data().loadData(folder,virtual)
-        return MMstack(self.mm,stack)
+        return MMstack(self.bridge,stack)
 
     def __enter__(self):
         return self 
@@ -337,4 +381,25 @@ if __name__ == '__main__':
         for i in range(50): 
             stack.get_img(C=1,P=1,T=i,Z=1)
             print(i)
+
+
+def find_unique_wells(stack):
+    import re
+    import numpy as np 
+
+    regex = '(.*?)-Pos(.*?)_(.*)'
+    labs = [re.search(regex,e) for e in stack.positions_names ]
+    res = [lab.group(1) for lab in labs]
+    # find all wells labels, keeping insertion order
+    all_wells = dict.fromkeys(res)
+    print('found {} unique wells'.format(len(all_wells.keys())))
+    print('list of wells names:'+ ' '.join([str(x) for x in all_wells.keys()]))
+    
+    for well in all_wells.keys():
+        regex_well = '^{}-Pos(.*?)_(.*)'.format(well)
+        is_match = [re.search(regex_well,e) for e in stack.positions_names ]
+        idxs = np.flatnonzero(is_match)
+        all_wells[well] = idxs
+    return all_wells
+
 # %%
