@@ -7,7 +7,7 @@ from numpy import array
 import subprocess
 from tqdm.auto import tqdm
 import os
-debug = True
+debug = False
 
 class MMstack():
     # convert MM channel names to short notation
@@ -94,34 +94,40 @@ class MMstack():
         ''''''
         imgs = list(self._substack_generator(P = P, T = T, C = C, Z = Z, unpack=unpack,ignore_err=ignore_err))
         _ , dims_after = self._get_coords_prod(P = P,T = T, C = C, Z = Z)
+        dims_vals = list(dims_after.values())
         if unpack:
             imgs,metadata = [x[0] for x in imgs],[x[1] for x in imgs]
             h,w = imgs[0].shape #assuming all images are of the same size
-            imgs = np.array(imgs).reshape(dims_after+[h,w])
-            metadata = np.array(metadata).reshape(dims_after)
+            imgs = np.array(imgs).reshape(dims_vals+[h,w])
+            metadata = np.array(metadata).reshape(dims_vals)
             return imgs, metadata
         else:
-            imgs = np.array(imgs).reshape(dims_after)
+            imgs = np.array(imgs).reshape(dims_vals)
             return imgs
 
-    def _get_coords_prod(self,P = None,T = None, C = None, Z = None,reshape=False):
-        ''' Return the coords as a list of dict, or as an'''
+    def _get_coords_prod(self,P = None,T = None, C = None, Z = None,new=False,reshape=False):
+        ''' Return the coords as a list of dict, or as a ndarray
+            new: if the coords are returned as relative coordinates
+        '''
         cdict = self._gen_coords(P = P,T = T, C = C, Z = Z)
+        if new:
+            cdict = {k:list(range(len(v))) for k,v in cdict.items()}
         coords_prod = dict_product(cdict) #cartesian product
-        dims = list(map(len,cdict.values()))
-        if reshape: coords_prod = np.array(coords_prod).reshape(*dims)
+        dims = {k:len(v) for k,v in cdict.items()} #list(map(len,cdict.values()))
+        if reshape: coords_prod = np.array(coords_prod).reshape(*dims.values())
         return coords_prod, dims
 
     def get_metadata(self,P = None,T = None, C = None, Z = None,ignore_err=False):
         ''''''
         all_coords,dims_after = self._get_coords_prod(P = P,T = T, C = C, Z = Z)
+        dims_vals = list(dims_after.values())
         metadata = []
         for i,coord in tqdm(enumerate(all_coords)):
             img = self.get_img(**coord,unpack=False,ignore_err=ignore_err)
             metadatum = img.getMetadata()
             metadata.append(metadatum)
             img._close()
-        metadata = np.array(metadata).reshape(dims_after)
+        metadata = np.array(metadata).reshape(dims_vals)
         return metadata
 
     def _gen_coords(self,P = None,T = None, C = None, Z = None):
@@ -144,14 +150,19 @@ class MMstack():
                     coords.append(list(map(lambda x: self._str_to_idx(dim,x),val)))
         return dict(zip(self.dims.keys(),coords))
 
+    def _gen_new_coords(self,P = None,T = None, C = None, Z = None):
+        ''' return new coordinates as a multi-d array of dict '''
+        cdict = self._gen_coords(P = P,T = T, C = C, Z = Z)
+        cdict_new = {k:list(range(len(v))) for k,v in cdict.items()}
+        return cdict_new
+
     def save_substack(self,folder,P = None,T = None, C = None, Z = None,split_pos=False,separate_meta=False,remove_z=False): # same signature as get_substack
         '''Make a real stack object from the coordinates '''
         cdict = self._gen_coords(P = P,T = T, C = C, Z = Z)
-        Tl,Pl,Zl,Cl = cdict['T'], cdict['P'], cdict['Z'], cdict['C'] #keep list of positions
         coords_prod = dict_product(cdict) #cartesian product
-        cdict_new = {k:list(range(len(v))) for k,v in cdict.items()}
-        coords_prod_new = dict_product(cdict_new)
-        #new_coords_prod = dict_product(self.gen_coords() #cartesian product
+        coords_prod_new, _ = self._get_coords_prod(new=True, P = P,T = T, C = C, Z = Z)
+
+        Tl,Pl,Zl,Cl = cdict['T'], cdict['P'], cdict['Z'], cdict['C'] #keep list of positions
         store = self._mmstudio.data().createMultipageTIFFDatastore(folder,separate_meta,split_pos)
         smb = self._metadata.copyBuilder()
         ndims = self._builder.z(len(Zl)).time(len(Tl)).channel(len(Cl)).stagePosition(len(Pl)).build()
@@ -181,14 +192,11 @@ class MMstack():
         for coord,coord_new in tqdm(zip(coords_prod,coords_prod_new)):
             # old coordinates
             To,Po,Zo,Co  = coord['T'], coord['P'],coord['Z'],coord['C'],
-
-            # new coordinates (position of them in the new array)
-            #Tn,Pn,Zn,Cn = Tl.index(To),Pl.index(Po),Zl.index(Zo),Cl.index(Co)
-            # new coordinates (as indexed in the new coord array)
+            # new coordinates
             Tn,Pn,Zn,Cn = coord_new['T'],coord_new['P'],coord_new['Z'],coord_new['C']
+
             if debug: print(f"{[Po,To,Co,Zo]}--->{[Pn,Tn,Cn,Zn]}")
             img = self.get_img(C=Co,P=Po,T=To,Z=Zo,unpack=False)
-            #img = self.stack.getImage(mmcord)
             mmcordn = self._builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
             imgn = img.copyAtCoords(mmcordn)
             img._close()
@@ -360,19 +368,25 @@ def find_unique_wells(stack):
         all_wells[well] = idxs
     return all_wells
 
-def dict_product(dicts):
+def dict_product(dic):
     """
-    #from stackoverflow, takes a dictionary ang generates the cartesian product of its values as dictionnaries
-    # such that one dict has the keys and the values of one such element of the product
-    >>> list(dict_product(dict(number=[1,2], character='ab')))
+    from stackoverflow, takes a dictionary ang generates the cartesian product of its values as dictionnaries
+    such that one dict has the keys and the values of one such element of the product
+    >>> dict_product(dict(number=[1,2], character='ab'))
     [{'character': 'a', 'number': 1},
      {'character': 'a', 'number': 2},
      {'character': 'b', 'number': 1},
      {'character': 'b', 'number': 2}]
     """
-    return list((dict(zip(dicts, x)) for x in product(*dicts.values())))
+    return list((dict(zip(dic, e)) for e in product(*dic.values())))
 
-
+def find_dims_coords(cdict):
+    ''' Takes a list of dict and return the associated number of elements for each key '''
+    assert type(cdict) == list
+    vals = [ ]
+    keys = cdict[0].keys()
+    merged_dicts =  { k:len(set(e[k] for e in cdict)) for k in keys }
+    return merged_dicts
 
 if __name__ == '__main__':
     # Some tests
