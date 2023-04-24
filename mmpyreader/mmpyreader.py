@@ -328,10 +328,10 @@ class MMstack():
         return ch_dict
 
 class MMpyreader():
-    def __init__(self) -> None:
+    def __init__(self,port=4827) -> None:
         # From pycromanager's documentation
         # https://pycro-manager.readthedocs.io/en/latest/mm_java_apis.html
-        self.bridge = Bridge(convert_camel_case=False,iterate=True,debug=False)
+        self.bridge = Bridge(port=port,convert_camel_case=False,iterate=True,debug=False)
         self.mm = self.bridge.get_studio()
         MMstack._set_bridge(self.bridge)
 
