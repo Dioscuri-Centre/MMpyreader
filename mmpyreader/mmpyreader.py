@@ -328,10 +328,18 @@ class MMstack():
         return ch_dict
 
 class MMpyreader():
-    def __init__(self,port=4827) -> None:
+    def __init__(self,port='auto',verbose=False) -> None:
         # From pycromanager's documentation
         # https://pycro-manager.readthedocs.io/en/latest/mm_java_apis.html
+        if port == 'auto':
+            import os 
+            if os.name == 'nt':
+                port =  4827
+            elif os.name == 'posix':
+                port = os.getuid() + 3827
+        
         self.bridge = Bridge(port=port,convert_camel_case=False,iterate=True,debug=False)
+        if verbose: print(f"Bridge is opened on port {port}")
         self.mm = self.bridge.get_studio()
         MMstack._set_bridge(self.bridge)
 
