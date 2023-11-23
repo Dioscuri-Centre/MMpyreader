@@ -7,12 +7,12 @@ Under the hood it uses pycromanager [https://github.com/micro-manager/pycro-mana
 
 If you have never installed the package, install with pip: 
 ```bash 
- pip install  git+https://github.com/Dioscuri-Centre/MMpyreader numpy==1.23.4 docstring_inheritance tqdm
+ pip install  git+https://github.com/Dioscuri-Centre/MMpyreader
 ```
 
 If you have already installed, to be on the safe side you can force to reinstall all related packages: 
 ```bash 
- pip install --force-reinstall  git+https://github.com/Dioscuri-Centre/MMpyreader numpy==1.23.4 docstring_inheritance tqdm
+ pip install --force-reinstall  git+https://github.com/Dioscuri-Centre/MMpyreader
 ```
 
 Check that you can import the library with python:

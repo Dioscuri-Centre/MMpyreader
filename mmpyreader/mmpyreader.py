@@ -1,4 +1,7 @@
-from pycromanager import Bridge
+from pycromanager import Studio,Core,JavaObject
+from pycromanager.zmq_bridge.bridge import _Bridge as Bridge
+
+
 from itertools import product
 import numpy as np
 from os import path
@@ -10,14 +13,22 @@ import os
 debug = False
 import warnings
 class MMstack():
+
+    # make those references class attributes
+    _mmstudio = None
+    _mmcore = None
     # convert MM channel names to short notation
     __ch_pretty = dict(channel='C',position='P',time='T',z='Z') # we choose this order
     # the reverse mapping
     __ch_mm = dict(zip(__ch_pretty.values(),__ch_pretty.keys()))
 
     @classmethod
-    def _set_bridge(cls,bridge):
-        cls.bridge = bridge
+    def _set_studio(cls,studio):
+        cls._mmstudio = studio
+
+    @classmethod
+    def _set_core(cls,core):
+        cls._mmcore = core
 
     @classmethod
     def _from_store(cls,store):
@@ -25,7 +36,6 @@ class MMstack():
         raise NotImplemented
 
     def __init__(self,mmstore):
-        self._mmstudio = self.bridge.get_studio()
         self._mmstore = mmstore
         self._builder = self._mmstudio.data().getCoordsBuilder()
         self._metadata = self._mmstore.getSummaryMetadata()
@@ -169,10 +179,10 @@ class MMstack():
         ndims = self._builder.z(len(Zl)).time(len(Tl)).channel(len(Cl)).stagePosition(len(Pl)).build()
         smb = smb.intendedDimensions(ndims)
 
-        bridge = self.bridge
+        #bridge = self.bridge
         # Set positions
         orig_pos = self.positions
-        arraylist_pos = bridge.construct_java_object('java.util.ArrayList')
+        arraylist_pos = JavaObject('java.util.ArrayList',iterate=True)
         for p in Pl:
             pos = orig_pos[p]
             if remove_z:
@@ -182,7 +192,7 @@ class MMstack():
         smb = smb.stagePositions(arraylist_pos)
 
         # Set channels
-        arraylist_channels = bridge.construct_java_object('java.util.ArrayList')
+        arraylist_channels = JavaObject('java.util.ArrayList',iterate=True)
         for c in Cl:
             arraylist_channels.add(self.channels[c])
         smb = smb.channelNames(arraylist_channels)
@@ -220,7 +230,7 @@ class MMstack():
                     raise Exception("Micro-manager doesn't work with 32bits arrays")
                 
                 num_type = img_np.dtype.type
-                imgn = self.bridge.get_studio().data().createImage(img_np,
+                imgn = self._mmstudio.data().createImage(img_np,
                                                                 width,
                                                                 height,
                                                                 bytes_per_pix,
@@ -386,10 +396,12 @@ class MMpyreader():
             elif os.name == 'posix':
                 port = os.getuid() + 3827
         
-        self.bridge = Bridge(port=port,convert_camel_case=False,iterate=True,debug=False)
+        bridge = Bridge.create_or_get_existing_bridge(port=port,convert_camel_case=False,debug=False,iterate=True)
+        self.core = Core()
         if verbose: print(f"Bridge is opened on port {port}")
-        self.mm = self.bridge.get_studio()
-        MMstack._set_bridge(self.bridge)
+        self.mm = Studio()
+        MMstack._set_studio(self.mm)
+        MMstack._set_core(self.core)
 
     def load_folder(self,folder: str,virtual: bool = True) -> None:
         if folder.endswith('ome.tif'):
@@ -403,7 +415,7 @@ class MMpyreader():
         return self
 
     def __exit__(self, type, value, traceback):
-        self.bridge.close()
+        pass
 
 def find_unique_wells(stack):
     import re
