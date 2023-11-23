@@ -8,7 +8,7 @@ import subprocess
 from tqdm.auto import tqdm
 import os
 debug = False
-
+import warnings
 class MMstack():
     # convert MM channel names to short notation
     __ch_pretty = dict(channel='C',position='P',time='T',z='Z') # we choose this order
@@ -32,6 +32,7 @@ class MMstack():
         self.channels = self._metadata.getChannelNameList()
         self.positions = self._metadata.getStagePositionList()
         self.positions_names = [p.getLabel() for p in self._metadata.getStagePositionList()]
+        self.positions_coords = self._metadata.getStagePositionList()
         self.dims = self._get_dims()
 
     def get_img(self,P:int = None,T:int = None, C:int = None, Z:int = None,unpack=True,ignore_err=False):
@@ -156,11 +157,11 @@ class MMstack():
         cdict_new = {k:list(range(len(v))) for k,v in cdict.items()}
         return cdict_new
 
-    def save_substack(self,folder,P = None,T = None, C = None, Z = None,split_pos=False,separate_meta=False,remove_z=False): # same signature as get_substack
+    def save_substack(self,folder,P = None,T = None, C = None, Z = None,repl_img=None,split_pos=False,separate_meta=False,remove_z=False): # same signature as get_substack
         '''Make a real stack object from the coordinates '''
         cdict = self._gen_coords(P = P,T = T, C = C, Z = Z)
         coords_prod = dict_product(cdict) #cartesian product
-        coords_prod_new, _ = self._get_coords_prod(new=True, P = P,T = T, C = C, Z = Z)
+        coords_prod_new, dims = self._get_coords_prod(new=True, P = P,T = T, C = C, Z = Z)
 
         Tl,Pl,Zl,Cl = cdict['T'], cdict['P'], cdict['Z'], cdict['C'] #keep list of positions
         store = self._mmstudio.data().createMultipageTIFFDatastore(folder,separate_meta,split_pos)
@@ -188,6 +189,8 @@ class MMstack():
 
 
         store.setSummaryMetadata(smb.build())
+        if repl_img is not None: 
+            assert repl_img.shape[:-2] == tuple(dims.values()), f"dims don't match: {repl_img.shape[:-2]} != {tuple(dims.values())}"
 
         for coord,coord_new in tqdm(zip(coords_prod,coords_prod_new)):
             # old coordinates
@@ -198,8 +201,39 @@ class MMstack():
             if debug: print(f"{[Po,To,Co,Zo]}--->{[Pn,Tn,Cn,Zn]}")
             img = self.get_img(C=Co,P=Po,T=To,Z=Zo,unpack=False)
             mmcordn = self._builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
-            imgn = img.copyAtCoords(mmcordn)
+            
+            if repl_img is not None: 
+                img_np = repl_img[Tn,Pn,Zn,Cn]# get image from input array 
+                height,width =  img_np.shape
+                bytes_per_pix = img_np.dtype.itemsize
+                num_components = 1
+                metadata = img.getMetadata()
+                acceptable_dtypes = (np.uint16,np.int16,np.uint8,np.float32)
+                assert img_np.dtype in acceptable_dtypes, 'cannot process {img_np.dtype}'
+                
+                if img_np.dtype == np.uint16:
+                    # the micro-manager function only takes short or byte arrays
+                    img_np = img_np.astype(np.int16)
+                elif img_np.dtype == np.float32:
+                    # need to create an array which would have the same byte representation
+                    # but of the bytes/short type 
+                    raise Exception("Micro-manager doesn't work with 32bits arrays")
+                
+                num_type = img_np.dtype.type
+                imgn = self.bridge.get_studio().data().createImage(img_np,
+                                                                width,
+                                                                height,
+                                                                bytes_per_pix,
+                                                                num_components,
+                                                                mmcordn,
+                                                                metadata)
+                #FIXME a bit overkill but I really want to be sure that the correct data is saved 
+                assert num_type(imgn.getIntensityAt(0,0)) == img_np[0,0], f"{num_type(imgn.getIntensityAt(0,0))} != {img_np[0,0]}"
+            
+            else:
+                imgn = img.copyAtCoords(mmcordn)
             img._close()
+            
             if remove_z:
                 meta = imgn.getMetadata()
                 meta_new = meta.copy()
@@ -214,17 +248,31 @@ class MMstack():
         newstack = type(self)(store)
         store.freeze()
         store.close()
-        return newstack
+        #I'd want the new stack to be returned but I'm not sure it's the proper way to deal with it
+        #return newstack
 
-    def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,):
+    def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,wells=None,split_timepoints=False,separate_metadata=True):
         unique_wells = find_unique_wells(self)
         if(len(list(unique_wells))) == len(self.positions):
             print('It doesn\'t seem that your data contains separate wells data')
             return
+        
+        if wells != None: 
+            unique_wells = { well:pos for well,pos in unique_wells.items() if well in wells }
+
         for well,pos in unique_wells.items():
             out_folder = os.path.join(root_folder,'well_{}'.format(well))
-            print('{} folder created.'.format(out_folder))
-            self.save_substack(P=pos,T = T, C = C, Z = Z,folder=out_folder)
+            if split_timepoints: 
+                if not T:
+                    ts = range(self.dims['T'])
+                else:
+                    ts = T
+                for t in ts:
+                    out_folder_t = os.path.join(out_folder,'T{}'.format(t))
+                    self.save_substack(P=pos,T = t, C = C, Z = Z,folder=out_folder_t,separate_meta=separate_metadata)
+            else: 
+                print('{} folder created.'.format(out_folder))
+                self.save_substack(P=pos,T = T, C = C, Z = Z,folder=out_folder,separate_meta=separate_metadata)
 
     def save_substack_fancy(self,folder,P = None,T = None, C = None, Z = None,linkedcoord = None): # same signature as get_substack
         ''' Use some "fancy indexing" so that coordinates of same length are iterated at the same time (zipped)
@@ -403,8 +451,8 @@ if __name__ == '__main__':
     import matplotlib.cm as cm
     mpl.rc('image', cmap='gray') # set default cmap as gray
     with MMpyreader() as reader:
-        stack = reader.load_folder("/mnt/dioscuri-nas/Ola/2021.11.19_colonies2/_1",True)
-        stack_meta = stack.metadata
+        stack = reader.load_folder("/mnt/dioscuri-nas/Dioscuri2/Ola/2021.11.19_colonies2/_1",True)
+        stack_meta = stack._metadata
         # Get a single image
         img,img_meta = stack.get_img(C=1,P=1,T=3,Z=1)
         # Get a substack, if an element is not provided it is assumed you want
@@ -416,7 +464,7 @@ if __name__ == '__main__':
 
         # get multiple images:
         for i in range(50):
+            print(f"getting image {i}")
             stack.get_img(C=1,P=1,T=i,Z=1)
-            print(i)
 
 
