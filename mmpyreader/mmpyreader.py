@@ -182,7 +182,7 @@ class MMstack():
         #bridge = self.bridge
         # Set positions
         orig_pos = self.positions
-        arraylist_pos = JavaObject('java.util.ArrayList',iterate=True)
+        arraylist_pos = JavaObject('java.util.ArrayList')
         for p in Pl:
             pos = orig_pos[p]
             if remove_z:
@@ -192,7 +192,7 @@ class MMstack():
         smb = smb.stagePositions(arraylist_pos)
 
         # Set channels
-        arraylist_channels = JavaObject('java.util.ArrayList',iterate=True)
+        arraylist_channels = JavaObject('java.util.ArrayList')
         for c in Cl:
             arraylist_channels.add(self.channels[c])
         smb = smb.channelNames(arraylist_channels)
@@ -262,7 +262,12 @@ class MMstack():
         #return newstack
 
     def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,wells=None,split_timepoints=False,separate_metadata=True):
-        unique_wells = find_unique_wells(self)
+        
+        try:
+            unique_wells = find_unique_wells(self)
+        except:
+            unique_wells = find_unique_wells_hcs(self)
+
         if(len(list(unique_wells))) == len(self.positions):
             print('It doesn\'t seem that your data contains separate wells data')
             return
@@ -431,6 +436,25 @@ def find_unique_wells(stack):
 
     for well in all_wells.keys():
         regex_well = '^{}-Pos(.*?)_(.*)'.format(well)
+        is_match = [re.search(regex_well,e) for e in stack.positions_names ]
+        idxs = np.flatnonzero(is_match)
+        all_wells[well] = idxs
+    return all_wells
+
+def find_unique_wells_hcs(stack):
+    import re
+    import numpy as np
+
+    regex = '(.*?)-Site_(.*?)'
+    labs = [re.search(regex,e) for e in stack.positions_names ]
+    res = [lab.group(1) for lab in labs]
+    # find all wells labels, keeping insertion order
+    all_wells = dict.fromkeys(res)
+    print('found {} unique wells'.format(len(all_wells.keys())))
+    print('list of wells names:'+ ' '.join([str(x) for x in all_wells.keys()]))
+
+    for well in all_wells.keys():
+        regex_well = '^{}-Site_(.*?)'.format(well)
         is_match = [re.search(regex_well,e) for e in stack.positions_names ]
         idxs = np.flatnonzero(is_match)
         all_wells[well] = idxs
