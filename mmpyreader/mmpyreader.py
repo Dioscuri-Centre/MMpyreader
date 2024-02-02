@@ -174,12 +174,12 @@ class MMstack():
         coords_prod_new, dims = self._get_coords_prod(new=True, P = P,T = T, C = C, Z = Z)
 
         Tl,Pl,Zl,Cl = cdict['T'], cdict['P'], cdict['Z'], cdict['C'] #keep list of positions
-        store = self._mmstudio.data().createMultipageTIFFDatastore(folder,separate_meta,split_pos)
+        store = self._mmstudio.data().createMultipageTIFFDatastore(os.path.abspath(folder),separate_meta,split_pos)
         smb = self._metadata.copyBuilder()
         ndims = self._builder.z(len(Zl)).time(len(Tl)).channel(len(Cl)).stagePosition(len(Pl)).build()
         smb = smb.intendedDimensions(ndims)
 
-        #bridge = self.bridge
+        #bridge = self.bridge   
         # Set positions
         orig_pos = self.positions
         arraylist_pos = JavaObject('java.util.ArrayList')
@@ -261,7 +261,7 @@ class MMstack():
         #I'd want the new stack to be returned but I'm not sure it's the proper way to deal with it
         #return newstack
 
-    def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,wells=None,split_timepoints=False,separate_metadata=True):
+    def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,wells=None,split_timepoints=False,separate_metadata=True,ignore_err=False):
         
         try:
             unique_wells = find_unique_wells(self)
@@ -284,8 +284,15 @@ class MMstack():
                     ts = T
                 for t in ts:
                     out_folder_t = os.path.join(out_folder,'T{}'.format(t))
-                    self.save_substack(P=pos,T = t, C = C, Z = Z,folder=out_folder_t,separate_meta=separate_metadata)
-            else: 
+                    try:
+                        self.save_substack(P=pos,T = t, C = C, Z = Z,folder=out_folder_t,separate_meta=separate_metadata)
+                    except Exception as E:
+                        print(E)
+                        if ignore_err:
+                            pass
+                        else:
+                            raise(E)
+            else:
                 print('{} folder created.'.format(out_folder))
                 self.save_substack(P=pos,T = T, C = C, Z = Z,folder=out_folder,separate_meta=separate_metadata)
 
