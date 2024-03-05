@@ -404,14 +404,16 @@ class MMpyreader():
         if port == 'auto':
             import os 
             if os.name == 'nt':
+                # On Windows, set the port to its default value
                 port =  4827
             elif os.name == 'posix':
+                # On Linux, set the port to the user id + offset
                 port = os.getuid() + 3827
         
         bridge = Bridge.create_or_get_existing_bridge(port=port,convert_camel_case=False,debug=False,iterate=True)
-        self.core = Core()
+        self.core = Core(port=port)
         if verbose: print(f"Bridge is opened on port {port}")
-        self.mm = Studio()
+        self.mm = Studio(port=port)
         MMstack._set_studio(self.mm)
         MMstack._set_core(self.core)
 
