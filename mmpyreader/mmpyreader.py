@@ -101,7 +101,7 @@ class MMstack():
             else:
                 yield img
 
-    def get_substack(self,P = None,T = None, C = None, Z = None, unpack=True,ignore_err=False):
+    def get_substack(self,*,P = None,T = None, C = None, Z = None, unpack=True,ignore_err=False):
         ''''''
         imgs = list(self._substack_generator(P = P, T = T, C = C, Z = Z, unpack=unpack,ignore_err=ignore_err))
         _ , dims_after = self._get_coords_prod(P = P,T = T, C = C, Z = Z)
@@ -148,6 +148,8 @@ class MMstack():
             val = locals()[dim]
             if type(val) == np.ndarray:
                 val = val.tolist()
+            if isinstance(val,np.integer):
+                val = val.item()
             if val == None: #if no value, we get the total number of elts
                 coords.append(list(range(self.dims[dim])))
             elif type(val) == int:
@@ -159,6 +161,8 @@ class MMstack():
                     coords.append(val)
                 elif set(list(map(type,val))) == {str} :
                     coords.append(list(map(lambda x: self._str_to_idx(dim,x),val)))
+            else:
+                raise Exception(f"coord {dim} is of Unhandled type {type(val)}")
         return dict(zip(self.dims.keys(),coords))
 
     def _gen_new_coords(self,P = None,T = None, C = None, Z = None):
