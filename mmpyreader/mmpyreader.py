@@ -561,6 +561,8 @@ def find_unique_wells(stack):
 
     regex = '(.*?)-Pos(.*?)_(.*)'
     labs = [re.search(regex,e) for e in stack.positions_names ]
+    # exclude labels which are not following the well pattern
+    labs = [ lab for lab in labs if lab]
     res = [lab.group(1) for lab in labs]
     # find all wells labels, keeping insertion order
     all_wells = dict.fromkeys(res)
@@ -580,6 +582,8 @@ def find_unique_wells_hcs(stack):
 
     regex = '(.*?)-Site_(.*?)'
     labs = [re.search(regex,e) for e in stack.positions_names ]
+    # exclude labels which are not following the well pattern
+    labs = [ lab for lab in labs if lab]
     res = [lab.group(1) for lab in labs]
     # find all wells labels, keeping insertion order
     all_wells = dict.fromkeys(res)
