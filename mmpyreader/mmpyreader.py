@@ -272,8 +272,119 @@ class MMstack():
         #I'd want the new stack to be returned but I'm not sure it's the proper way to deal with it
         #return newstack
 
+    @classmethod
+    def cat_stacks(cls,folder,stacks,P = None, C = None, Z = None,repl_img=None,split_pos=False,separate_meta=False,remove_z=False): 
+        ''' concatenate a series of stacks along time dimension '''
+        studio = cls._mmstudio
+        cb = studio.data().getCoordsBuilder()
+        stack0 = stacks[0]
+        n_timepoints = [s.dims['T'] for s in stacks]
+        tstart = np.cumsum([0]+n_timepoints).tolist()
+        time_ms = 0
+        tot_timepoints = sum(n_timepoints)
+        cdict = stack0._gen_coords(P = P,T = np.arange(tot_timepoints), C = C, Z = Z)
+        coords_prod = dict_product(cdict) #cartesian product
+        Tl,Pl,Zl,Cl = cdict['T'], cdict['P'], cdict['Z'], cdict['C'] #keep list of positions
+
+
+        store = studio.data().createMultipageTIFFDatastore(os.path.abspath(folder),True,True)
+        smb = stack0._metadata.copyBuilder()
+        ndims = cb.z(len(Zl)).time(len(Tl)).channel(len(Cl)).stagePosition(len(Pl)).build()
+        smb = smb.intendedDimensions(ndims)
+
+        #bridge = self.bridge   
+        # Set positions
+        orig_pos = stack0.positions
+        arraylist_pos = JavaObject('java.util.ArrayList')
+        for p in Pl:
+            pos = orig_pos[p]
+            if remove_z:
+                zpos = pos.get('ZDrive')
+                zpos.set1DPosition('ZDrive',0.0)
+            arraylist_pos.add(pos)
+        smb = smb.stagePositions(arraylist_pos)
+
+        # Set channels
+        arraylist_channels = JavaObject('java.util.ArrayList')
+        for c in Cl:
+            arraylist_channels.add(stack0.channels[c])
+        smb = smb.channelNames(arraylist_channels)
+
+        store.setSummaryMetadata(smb.build())
+        if repl_img is not None: 
+            assert repl_img.shape[:-2] == tuple(dims.values()), f"dims don't match: {repl_img.shape[:-2]} != {tuple(dims.values())}"
+        for cstack,t0 in zip(stacks,tstart):
+            coords_prod_new, dims = cstack._get_coords_prod(new=True, P = P, C = C, Z = Z)
+            first = True
+            for coord,coord_new in tqdm(zip(coords_prod,coords_prod_new),total=len(coords_prod_new)):
+                # there's a more elegant way to proceed by using the absolute time contained in the image but I'm too lazy to do it now
+                if first:
+                    tstart_ms = time_ms
+                    first = False
+                # old coordinates
+                To,Po,Zo,Co  = coord['T'], coord['P'],coord['Z'],coord['C'],
+                # new coordinates
+                Tn,Pn,Zn,Cn = coord['T']+t0,coord_new['P'],coord_new['Z'],coord_new['C']
+
+                if debug: print(f"{[Po,To,Co,Zo]}--->{[Pn,Tn,Cn,Zn]}")
+                img = cstack.get_img(C=Co,P=Po,T=To,Z=Zo,unpack=False,ignore_err=True)
+                mmcordn = cstack._builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
+                if not img: continue
+
+                if repl_img is not None: 
+                    img_np = repl_img[Tn,Pn,Zn,Cn]# get image from input array 
+                    height,width =  img_np.shape
+                    bytes_per_pix = img_np.dtype.itemsize
+                    num_components = 1
+                    metadata = img.getMetadata()
+                    acceptable_dtypes = (np.uint16,np.int16,np.uint8,np.float32)
+                    assert img_np.dtype in acceptable_dtypes, 'cannot process {img_np.dtype}'
+                    
+                    if img_np.dtype == np.uint16:
+                        # the micro-manager function only takes short or byte arrays
+                        img_np = img_np.astype(np.int16)
+                    elif img_np.dtype == np.float32:
+                        # need to create an array which would have the same byte representation
+                        # but of the bytes/short type 
+                        raise Exception("Micro-manager doesn't work with 32bits arrays")
+                    
+                    num_type = img_np.dtype.type
+                    imgn = studio.data().createImage(img_np,
+                                                                    width,
+                                                                    height,
+                                                                    bytes_per_pix,
+                                                                    num_components,
+                                                                    mmcordn,
+                                                                    metadata)
+                    #FIXME a bit overkill but I really want to be sure that the correct data is saved 
+                    assert num_type(imgn.getIntensityAt(0,0)) == img_np[0,0], f"{num_type(imgn.getIntensityAt(0,0))} != {img_np[0,0]}"
+                
+                else:
+                    metadata  = img.getMetadata()
+                    time_ms = metadata.getElapsedTimeMs()+tstart_ms
+                    mbuilder = metadata.copyBuilderPreservingUUID()
+                    metadata = mbuilder.elapsedTimeMs(time_ms).build()
+                    imgn = img.copyWith(mmcordn,metadata)
+                    img._close()
+
+                    if remove_z:
+                        meta = imgn.getMetadata()
+                        meta_new = meta.copy()
+                        meta_new.zPositionUm(0.0)
+                        meta_new = meta_new.build()
+                        imgn2 = imgn.copyWithMetadata(meta_new)
+                        imgn._close()
+                        imgn = imgn2
+                    store.putImage(imgn)
+                    imgn._close()
+
+        print("created new susbsack of size: ",end='')
+        newstack = cls(store)
+        store.freeze()
+        store.close()
+        #I'd want the new stack to be returned but I'm not sure it's the proper way to deal with it
+        #return newstack
     def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,wells=None,split_timepoints=False,separate_metadata=True,ignore_err=False):
-        
         try:
             unique_wells = find_unique_wells(self)
         except:
