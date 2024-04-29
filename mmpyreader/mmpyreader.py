@@ -1,7 +1,9 @@
-from pycromanager import Studio,Core,JavaObject
-from pycromanager.zmq_bridge.bridge import _Bridge as Bridge
-
-
+import pycromanager
+if int(pycromanager.__version__.split('.')[1]) > 17 : 
+    from pycromanager import Studio,Core,JavaObject
+    from pycromanager.zmq_bridge.bridge import _Bridge as Bridge
+else: 
+    from pycromanager import Bridge
 from itertools import product
 import numpy as np
 from os import path
