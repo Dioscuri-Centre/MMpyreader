@@ -17,8 +17,8 @@ import warnings
 class MMstack():
 
     # make those references class attributes
-    _mmstudio = None
-    _mmcore = None
+    #_mmstudio = None
+    #_mmcore = None
     # convert MM channel names to short notation
     __ch_pretty = dict(channel='C',position='P',time='T',z='Z') # we choose this order
     # the reverse mapping
@@ -137,9 +137,14 @@ class MMstack():
         metadata = []
         for i,coord in tqdm(enumerate(all_coords)):
             img = self.get_img(**coord,unpack=False,ignore_err=ignore_err)
-            metadatum = img.getMetadata()
+            if img:
+                metadatum = img.getMetadata()
+                img._close()
+            else:
+                metadatum = None
+            
             metadata.append(metadatum)
-            img._close()
+            
         metadata = np.array(metadata).reshape(dims_vals)
         return metadata
 
@@ -420,8 +425,10 @@ class MMpyreader():
         self.core = Core(port=port)
         if verbose: print(f"Bridge is opened on port {port}")
         self.mm = Studio(port=port)
+        self.bridge = bridge
         MMstack._set_studio(self.mm)
         MMstack._set_core(self.core)
+        self.MMstack = MMstack
 
     def load_folder(self,folder: str,virtual: bool = True) -> None:
         if folder.endswith('ome.tif'):
