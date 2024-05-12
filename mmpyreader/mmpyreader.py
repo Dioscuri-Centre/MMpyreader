@@ -137,7 +137,7 @@ class MMstack():
         return coords_prod, dims
 
     def get_metadata(self,P = None,T = None, C = None, Z = None,ignore_err=False):
-        ''''''
+        '''retrives metadata without getting the underlying image'''
         all_coords,dims_after = self._get_coords_prod(P = P,T = T, C = C, Z = Z)
         dims_vals = list(dims_after.values())
         metadata = []
@@ -153,7 +153,28 @@ class MMstack():
             
         metadata = np.array(metadata).reshape(dims_vals)
         return metadata
-
+    
+    def downscale_img(self,mmimg,scale):
+        ij = self._mmstudio.data().ij()
+        datamanager = self._mmstudio.data()
+        ip = ij.createProcessor(mmimg)
+        ipn = ip.resize(ip.getWidth()//scale)
+        # The following method doesn't work for some reason
+        # mmimg_n = ij.createImage(ipn, mmimg.getCoords(), mmimg.getMetadata())
+        pixels = ipn.getPixels()
+        if pixels.dtype == np.uint16:
+            pixels = pixels.astype(np.int16)
+        # modify metadata
+        meta = mmimg.getMetadata()
+        metab = meta.copyBuilderPreservingUUID()
+        metab.pixelSizeUm(meta.getPixelSizeUm()*scale)
+        meta = metab.build()
+        coords = mmimg.getCoords()
+        # NEED TO HAVE THE BYTESWAP FIX FOR ENDIANESS !!!!!!!
+        mmimg_n = datamanager.createImage(pixels.byteswap(inplace=True),ipn.getHeight(),ipn.getWidth(),
+                                          mmimg.getBytesPerPixel(),ipn.getNChannels(),coords,meta)
+        return mmimg_n
+    
     def _gen_coords(self,P = None,T = None, C = None, Z = None):
         '''Convert different type of coordinates format to one that is understood by micro-manager'''
         coords = [] # we will generate a list of indexes (dicts) to retrieve
@@ -184,7 +205,10 @@ class MMstack():
         cdict_new = {k:list(range(len(v))) for k,v in cdict.items()}
         return cdict_new
 
-    def save_substack(self,folder,P = None,T = None, C = None, Z = None,repl_img=None,split_pos=False,separate_meta=False,remove_z=False): # same signature as get_substack
+    def save_substack(self,folder,*,P = None,T = None, C = None, Z = None,repl_img=None,
+                      split_pos=False,separate_meta=False,remove_z=False,
+                      progress=True,verbose=True,
+                      scale=-1): # same signature as get_substack
         '''Make a real stack object from the coordinates '''
         cdict = self._gen_coords(P = P,T = T, C = C, Z = Z)
         coords_prod = dict_product(cdict) #cartesian product
@@ -213,13 +237,17 @@ class MMstack():
         for c in Cl:
             arraylist_channels.add(self.channels[c])
         smb = smb.channelNames(arraylist_channels)
-
+        if scale != -1: 
+            smb.imageHeight(self._metadata.getImageHeight()//scale)
+            smb.imageWidth(self._metadata.getImageWidth()//scale)
 
         store.setSummaryMetadata(smb.build())
         if repl_img is not None: 
             assert repl_img.shape[:-2] == tuple(dims.values()), f"dims don't match: {repl_img.shape[:-2]} != {tuple(dims.values())}"
-
-        for coord,coord_new in tqdm(zip(coords_prod,coords_prod_new)):
+        elts = zip(coords_prod,coords_prod_new)
+        if progress: elts = tqdm(elts,leave=False,desc='saved images')
+        
+        for coord,coord_new in elts:
             # old coordinates
             To,Po,Zo,Co  = coord['T'], coord['P'],coord['Z'],coord['C'],
             # new coordinates
@@ -227,6 +255,9 @@ class MMstack():
 
             if debug: print(f"{[Po,To,Co,Zo]}--->{[Pn,Tn,Cn,Zn]}")
             img = self.get_img(C=Co,P=Po,T=To,Z=Zo,unpack=False)
+            if scale > 0:
+                img = self.downscale_img(img,scale) 
+
             mmcordn = self._builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
             
             if repl_img is not None: 
@@ -271,8 +302,9 @@ class MMstack():
                 imgn = imgn2
             store.putImage(imgn)
             imgn._close()
-        print("created new susbsack of size: ",end='')
-        newstack = type(self)(store)
+        if verbose:
+            print("created new susbsack of size: ",end='')
+            newstack = type(self)(store)
         store.freeze()
         store.close()
         #I'd want the new stack to be returned but I'm not sure it's the proper way to deal with it
@@ -280,7 +312,7 @@ class MMstack():
 
     @classmethod
     def cat_stacks(cls,folder,stacks,P = None, C = None, Z = None,repl_img=None,split_pos=False,separate_meta=False,remove_z=False): 
-        ''' concatenate a series of stacks along time dimension '''
+        ''' concatenate a series of stacks along time '''
         studio = cls._mmstudio
         cb = studio.data().getCoordsBuilder()
         stack0 = stacks[0]
@@ -292,13 +324,11 @@ class MMstack():
         coords_prod = dict_product(cdict) #cartesian product
         Tl,Pl,Zl,Cl = cdict['T'], cdict['P'], cdict['Z'], cdict['C'] #keep list of positions
 
-
         store = studio.data().createMultipageTIFFDatastore(os.path.abspath(folder),True,True)
         smb = stack0._metadata.copyBuilder()
         ndims = cb.z(len(Zl)).time(len(Tl)).channel(len(Cl)).stagePosition(len(Pl)).build()
         smb = smb.intendedDimensions(ndims)
 
-        #bridge = self.bridge   
         # Set positions
         orig_pos = stack0.positions
         arraylist_pos = JavaObject('java.util.ArrayList')
@@ -318,11 +348,38 @@ class MMstack():
 
         store.setSummaryMetadata(smb.build())
         if repl_img is not None: 
-            assert repl_img.shape[:-2] == tuple(dims.values()), f"dims don't match: {repl_img.shape[:-2]} != {tuple(dims.values())}"
-        for cstack,t0 in zip(stacks,tstart):
+            img_np = repl_img# get image from input array 
+            height,width =  img_np.shape
+            bytes_per_pix = img_np.dtype.itemsize
+            num_components = 1
+            #metadata = img.getMetadata()
+            acceptable_dtypes = (np.uint16,np.int16,np.uint8,np.float32)
+            assert img_np.dtype in acceptable_dtypes, 'cannot process {img_np.dtype}'
+            
+            if img_np.dtype == np.uint16:
+                # the micro-manager function only takes short or byte arrays
+                img_np = img_np.astype(np.int16)
+            elif img_np.dtype == np.float32:
+                # need to create an array which would have the same byte representation
+                # but of the bytes/short type 
+                raise Exception("Micro-manager doesn't work with 32bits arrays")
+            
+            mmcoordn = cb.build()
+            meta_blank = studio.data().metadataBuilder().build()
+            blank = studio.data().createImage(img_np,
+                                            width,
+                                            height,
+                                            bytes_per_pix,
+                                            num_components,
+                                            mmcoordn,
+                                            meta_blank)
+            
+        pbar = tqdm(zip(stacks,tstart),total=len(stacks))
+        for cstack,t0 in pbar:
+            pbar.set_description("Processing « {} »".format(cstack._mmstore.getSummaryMetadata().getPrefix()))
             coords_prod_new, dims = cstack._get_coords_prod(new=True, P = P, C = C, Z = Z)
             first = True
-            for coord,coord_new in tqdm(zip(coords_prod,coords_prod_new),total=len(coords_prod_new)):
+            for coord,coord_new in tqdm(zip(coords_prod,coords_prod_new),total=len(coords_prod_new),leave=False):
                 # there's a more elegant way to proceed by using the absolute time contained in the image but I'm too lazy to do it now
                 if first:
                     tstart_ms = time_ms
@@ -334,43 +391,21 @@ class MMstack():
 
                 if debug: print(f"{[Po,To,Co,Zo]}--->{[Pn,Tn,Cn,Zn]}")
                 img = cstack.get_img(C=Co,P=Po,T=To,Z=Zo,unpack=False,ignore_err=True)
-                mmcordn = cstack._builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
-                if not img: continue
-
-                if repl_img is not None: 
-                    img_np = repl_img[Tn,Pn,Zn,Cn]# get image from input array 
-                    height,width =  img_np.shape
-                    bytes_per_pix = img_np.dtype.itemsize
-                    num_components = 1
-                    metadata = img.getMetadata()
-                    acceptable_dtypes = (np.uint16,np.int16,np.uint8,np.float32)
-                    assert img_np.dtype in acceptable_dtypes, 'cannot process {img_np.dtype}'
-                    
-                    if img_np.dtype == np.uint16:
-                        # the micro-manager function only takes short or byte arrays
-                        img_np = img_np.astype(np.int16)
-                    elif img_np.dtype == np.float32:
-                        # need to create an array which would have the same byte representation
-                        # but of the bytes/short type 
-                        raise Exception("Micro-manager doesn't work with 32bits arrays")
-                    
-                    num_type = img_np.dtype.type
-                    imgn = studio.data().createImage(img_np,
-                                                                    width,
-                                                                    height,
-                                                                    bytes_per_pix,
-                                                                    num_components,
-                                                                    mmcordn,
-                                                                    metadata)
-                    #FIXME a bit overkill but I really want to be sure that the correct data is saved 
-                    assert num_type(imgn.getIntensityAt(0,0)) == img_np[0,0], f"{num_type(imgn.getIntensityAt(0,0))} != {img_np[0,0]}"
-                
+                mmcoordn = cstack._builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
+                if not img:
+                    if repl_img is not None:
+                        imgn = blank.coopyAtCoords(mmcoordn)
+                        #FIXME a bit overkill but I really want to be sure that the correct data is saved 
+                        print("put replacement image at coords {}".format(dict(C=Cn,P=Pn,T=Tn,Z=Zn)))
+                    else:
+                        print("skipped image at coords {}".format(dict(C=Cn,P=Pn,T=Tn,Z=Zn)))
+                        continue
                 else:
                     metadata  = img.getMetadata()
                     time_ms = metadata.getElapsedTimeMs()+tstart_ms
                     mbuilder = metadata.copyBuilderPreservingUUID()
                     metadata = mbuilder.elapsedTimeMs(time_ms).build()
-                    imgn = img.copyWith(mmcordn,metadata)
+                    imgn = img.copyWith(mmcoordn,metadata)
                     img._close()
 
                     if remove_z:
@@ -381,48 +416,60 @@ class MMstack():
                         imgn2 = imgn.copyWithMetadata(meta_new)
                         imgn._close()
                         imgn = imgn2
-                    store.putImage(imgn)
-                    imgn._close()
+                
+                store.putImage(imgn)
+                imgn._close()
 
-        print("created new susbsack of size: ",end='')
+        print(f"Concatenated {len(stacks)}, dimensions of new stack: ",end='')
         newstack = cls(store)
         store.freeze()
         store.close()
         #I'd want the new stack to be returned but I'm not sure it's the proper way to deal with it
         #return newstack
-    def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,wells=None,split_timepoints=False,separate_metadata=True,ignore_err=False):
-        try:
-            unique_wells = find_unique_wells(self)
-        except:
-            unique_wells = find_unique_wells_hcs(self)
+
+    def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,wells=None,
+                             grid=None,scale=-1,
+                             split_timepoints=False,separate_metadata=True,ignore_err=False): 
+        unique_wells = find_unique_wells(self,verbose=True)
 
         if(len(list(unique_wells))) == len(self.positions):
             print('It doesn\'t seem that your data contains separate wells data')
             return
         
-        if wells != None: 
+        if wells != None: # remove wells we don't want 
             unique_wells = { well:pos for well,pos in unique_wells.items() if well in wells }
+        if grid != None: # make a square grid 
+            warnings.warn("Grid making is currently NOT working")
+            assert len(grid) == 4, 'please provide nx,ny and ngrid'
+            nx,ny,i0, ngrid = grid
+            for well,pos in unique_wells.items():
+                npos = len(pos)
+                assert nx*ny == npos
+                #i0 =  nx*(ny//2)+nx # npos//2 # central pos indesx  # [ (i - len(pos))//2 for i in range ]
+                #nx = np.sqrt(npos).astype(int)
+                idx = [] 
+                for j in range(-ngrid//2,ngrid//2):
+                    for i in range(-ngrid//2,ngrid//2):
+                        idx.append(i0+i+j*nx)
+                unique_wells[well] = pos[idx]
+                assert len(unique_wells[well]) == ngrid*ngrid
 
-        for well,pos in unique_wells.items():
+
+
+                #unique_wells = { well:pos[(len(pos) - ngrid**2)//2:(len(pos)+ngrid**2)//2] for well,pos in unique_wells.items() }
+        for well,pos in tqdm(unique_wells.items(),desc='Well completed'):
             out_folder = os.path.join(root_folder,'well_{}'.format(well))
+            opts = dict(P=pos, C = C, Z = Z,progress=True,verbose=False,separate_meta=separate_metadata,scale=scale)
             if split_timepoints: 
                 if not T:
                     ts = range(self.dims['T'])
                 else:
                     ts = T
-                for t in ts:
+                for t in tqdm(ts,leave=False,desc='Timepoint completed'):
                     out_folder_t = os.path.join(out_folder,'T{}'.format(t))
-                    try:
-                        self.save_substack(P=pos,T = t, C = C, Z = Z,folder=out_folder_t,separate_meta=separate_metadata)
-                    except Exception as E:
-                        print(E)
-                        if ignore_err:
-                            pass
-                        else:
-                            raise(E)
+                    self.save_substack(out_folder_t,**opts,T = t,)
             else:
-                print('{} folder created.'.format(out_folder))
-                self.save_substack(P=pos,T = T, C = C, Z = Z,folder=out_folder,separate_meta=separate_metadata)
+                self.save_substack(out_folder,**opts,T = T)
 
     def save_substack_fancy(self,folder,P = None,T = None, C = None, Z = None,linkedcoord = None): # same signature as get_substack
         ''' Use some "fancy indexing" so that coordinates of same length are iterated at the same time (zipped)
@@ -522,8 +569,10 @@ class MMstack():
         axes = [self.__ch_pretty[ax] for ax in axes]
         ch_dict = dict(zip(axes,axnb))
         # Output the result
-        if verbose: print(' x '.join([f"{v}{str(k)}" for k,v in ch_dict.items()]))
+        if verbose: print("stack dimensions:"+' x '.join([f"{v}{str(k)}" for k,v in ch_dict.items()]))
         return ch_dict
+
+
 
 class MMpyreader():
     def __init__(self,port='auto',verbose=False) -> None:
@@ -545,13 +594,13 @@ class MMpyreader():
         self.bridge = bridge
         MMstack._set_studio(self.mm)
         MMstack._set_core(self.core)
-        self.MMstack = MMstack
+        # self.MMstack = MMstack
 
     def load_folder(self,folder: str,virtual: bool = True) -> None:
         if folder.endswith('ome.tif'):
             folder = path.dirname(folder)
         assert path.isdir(folder), f"{folder} doesn't exist"
-        assert len(glob(path.join(folder,'*.ome.tif'))) >0, f"No ome.tif file in {folder}"
+        assert len(glob(path.join(folder,'*.ome.tif'))) >0, FileNotFoundError(f"No ome.tif file in {folder}")
         mmstore = self.mm.data().loadData(folder,virtual)
         return MMstack(mmstore)
 
@@ -561,47 +610,33 @@ class MMpyreader():
     def __exit__(self, type, value, traceback):
         pass
 
-def find_unique_wells(stack):
+def find_unique_wells(stack,verbose=False):
     import re
     import numpy as np
-
-    regex = '(.*?)-Pos(.*?)_(.*)'
-    labs = [re.search(regex,e) for e in stack.positions_names ]
-    # exclude labels which are not following the well pattern
-    labs = [ lab for lab in labs if lab]
-    res = [lab.group(1) for lab in labs]
-    # find all wells labels, keeping insertion order
-    all_wells = dict.fromkeys(res)
-    print('found {} unique wells'.format(len(all_wells.keys())))
-    print('list of wells names:'+ ' '.join([str(x) for x in all_wells.keys()]))
-
-    for well in all_wells.keys():
-        regex_well = '^{}-Pos(.*?)_(.*)'.format(well)
-        is_match = [re.search(regex_well,e) for e in stack.positions_names ]
-        idxs = np.flatnonzero(is_match)
-        all_wells[well] = idxs
+    
+    regex_grid = ['(.*?)-Pos(.*?)_(.*)','^{}-Pos(.*?)_(.*)','grid']
+    regex_hcs =  ['(.*?)-Site_(.*?)', '^{}-Site_(.*?)','HCS']
+    for regex_match,regex_extract,gridtype in [regex_grid,regex_hcs]: 
+        labs = [re.search(regex_match,e) for e in stack.positions_names ]
+        # exclude labels which are not following the well pattern
+        labs = [ lab for lab in labs if lab]
+        res = [lab.group(1) for lab in labs]
+        # find all wells labels, keeping insertion order
+        all_wells = dict.fromkeys(res)
+        for well in all_wells.keys():
+            regex_well = regex_extract.format(well)
+            is_match = [re.search(regex_well,e) for e in stack.positions_names ]
+            idxs = np.flatnonzero(is_match)
+            all_wells[well] = idxs
+        if all_wells: 
+            break
+    else: 
+        raise Exception("No position matching well-naming pattern found!")
+    if verbose:         
+        print('found {} unique wells following "{}" pattern'.format(len(all_wells),gridtype))
+        print('list of wells names: '+ ' '.join([str(x) for x in all_wells.keys()]))
     return all_wells
 
-def find_unique_wells_hcs(stack):
-    import re
-    import numpy as np
-
-    regex = '(.*?)-Site_(.*?)'
-    labs = [re.search(regex,e) for e in stack.positions_names ]
-    # exclude labels which are not following the well pattern
-    labs = [ lab for lab in labs if lab]
-    res = [lab.group(1) for lab in labs]
-    # find all wells labels, keeping insertion order
-    all_wells = dict.fromkeys(res)
-    print('found {} unique wells'.format(len(all_wells.keys())))
-    print('list of wells names:'+ ' '.join([str(x) for x in all_wells.keys()]))
-
-    for well in all_wells.keys():
-        regex_well = '^{}-Site_(.*?)'.format(well)
-        is_match = [re.search(regex_well,e) for e in stack.positions_names ]
-        idxs = np.flatnonzero(is_match)
-        all_wells[well] = idxs
-    return all_wells
 
 def dict_product(dic):
     """
