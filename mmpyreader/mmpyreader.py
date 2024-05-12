@@ -1,7 +1,13 @@
 import pycromanager
-if int(pycromanager.__version__.split('.')[1]) > 17 : 
+if  30 > int(pycromanager.__version__.split('.')[1]) > 17 : 
     from pycromanager import Studio,Core,JavaObject
     from pycromanager.zmq_bridge.bridge import _Bridge as Bridge
+elif   int(pycromanager.__version__.split('.')[1]) > 30 :
+    # For future versions (but let's not worry for now, 0.29.10 works well)
+    from pycromanager.core import Core
+    from pycromanager.mm_java_classes import Studio
+    from pyjavaz import JavaObject
+    from pyjavaz import bridge as Bridge  
 else: 
     from pycromanager import Bridge
 from itertools import product
