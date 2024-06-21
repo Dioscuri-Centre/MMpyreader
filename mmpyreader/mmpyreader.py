@@ -136,12 +136,16 @@ class MMstack():
         if reshape: coords_prod = np.array(coords_prod).reshape(*dims.values())
         return coords_prod, dims
 
-    def get_metadata(self,P = None,T = None, C = None, Z = None,ignore_err=False):
+    def get_metadata(self,P = None,T = None, C = None, Z = None,ignore_err=False,pbar=False):
         '''retrives metadata without getting the underlying image'''
         all_coords,dims_after = self._get_coords_prod(P = P,T = T, C = C, Z = Z)
         dims_vals = list(dims_after.values())
         metadata = []
-        for i,coord in tqdm(enumerate(all_coords)):
+        if pbar: 
+            elts = tqdm(enumerate(all_coords))
+        else:
+            elts = enumerate(all_coords)
+        for i,coord in elts:
             img = self.get_img(**coord,unpack=False,ignore_err=ignore_err)
             if img:
                 metadatum = img.getMetadata()
@@ -155,24 +159,27 @@ class MMstack():
         return metadata
     
     def downscale_img(self,mmimg,scale):
+        from skimage.transform import downscale_local_mean
         ij = self._mmstudio.data().ij()
         datamanager = self._mmstudio.data()
-        ip = ij.createProcessor(mmimg)
-        ipn = ip.resize(ip.getWidth()//scale)
-        # The following method doesn't work for some reason
-        # mmimg_n = ij.createImage(ipn, mmimg.getCoords(), mmimg.getMetadata())
-        pixels = ipn.getPixels()
-        if pixels.dtype == np.uint16:
+        ip = ij.createProcessor(mmimg) 
+        pixels = ip.getPixels().reshape(ip.getHeight(),-1)
+        pixels = downscale_local_mean(pixels,(scale,scale)).astype(pixels.dtype)
+        # remove extra pixel, if any
+        newdims = (ip.getHeight() // scale,ip.getHeight() // scale)
+        pixels = pixels[:newdims[0],:newdims[1]]
+        if pixels.dtype == np.uint16: #micro-manager doesn't like uint16, requires conversion
             pixels = pixels.astype(np.int16)
         # modify metadata
         meta = mmimg.getMetadata()
         metab = meta.copyBuilderPreservingUUID()
-        metab.pixelSizeUm(meta.getPixelSizeUm()*scale)
+        metab.pixelSizeUm(meta.getPixelSizeUm()* (ip.getHeight()/newdims[0]) )
         meta = metab.build()
         coords = mmimg.getCoords()
+        assert ip.getNChannels() == 1 
         # NEED TO HAVE THE BYTESWAP FIX FOR ENDIANESS !!!!!!!
-        mmimg_n = datamanager.createImage(pixels.byteswap(inplace=True),ipn.getHeight(),ipn.getWidth(),
-                                          mmimg.getBytesPerPixel(),ipn.getNChannels(),coords,meta)
+        mmimg_n = datamanager.createImage(pixels.byteswap(inplace=True),newdims[0],newdims[1],
+                                          mmimg.getBytesPerPixel(),ip.getNChannels(),coords,meta)
         return mmimg_n
     
     def _gen_coords(self,P = None,T = None, C = None, Z = None):
@@ -206,7 +213,7 @@ class MMstack():
         return cdict_new
 
     def save_substack(self,folder,*,P = None,T = None, C = None, Z = None,repl_img=None,
-                      split_pos=False,separate_meta=False,remove_z=False,
+                      split_pos=True,separate_meta=False,remove_z=False,
                       progress=True,verbose=True,
                       scale=-1): # same signature as get_substack
         '''Make a real stack object from the coordinates '''
@@ -572,7 +579,30 @@ class MMstack():
         if verbose: print("stack dimensions:"+' x '.join([f"{v}{str(k)}" for k,v in ch_dict.items()]))
         return ch_dict
 
+    def print_summary(self):
+        # experiment folder 
+        meta = self._metadata
+        dims = self.dims
+        stack_name = meta.getPrefix()
+        #print all channels 
+        channels = self.channels
+        last_img_pos = d = {k:v-1 for k,v in self.dims.items()}
+        acq_freq = meta.getWaitInterval()
+        if acq_freq: 
+            acq_freq /= (60*1000)
+        duration =  self.get_metadata(**last_img_pos)[0,0,0,0].getElapsedTimeMs() - self.get_metadata(0,0,0,0)[0,0,0,0].getElapsedTimeMs()
 
+        imgsize = meta.getImageWidth(),meta.getImageHeight()
+        computer = meta.getComputerName()
+        microscope = 'Nikon#1' if computer == 'DESKTOP-LRLD4CI' else 'Nikon2' if computer == 'DESKTOP-O3SQV2H' else 'Unkown'
+
+        print(f'{dims["C"]} channels: {channels}')
+        # FIXME: getWaitInterval is not reliable if the stack has been resliced 
+        print(f'{dims["T"]} images taken every  {acq_freq} min')
+        if acq_freq:
+            print(f'total duration: {duration/(60*60*1000):.4g}  hours')
+        print(f'Image size: {imgsize[0]}x{imgsize[1]} ')
+        print(f'Microscope used: {microscope} (Computer: {computer})')
 
 class MMpyreader():
     def __init__(self,port='auto',verbose=False) -> None:
