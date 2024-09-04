@@ -2,12 +2,19 @@ import pycromanager
 if  30 > int(pycromanager.__version__.split('.')[1]) > 17 : 
     from pycromanager import Studio,Core,JavaObject
     from pycromanager.zmq_bridge.bridge import _Bridge as Bridge
-elif   int(pycromanager.__version__.split('.')[1]) > 30 :
+elif int(pycromanager.__version__.split('.')[1]) >= 30 :
     # For future versions (but let's not worry for now, 0.29.10 works well)
     from pycromanager.core import Core
     from pycromanager.mm_java_classes import Studio
+    import pyjavaz
+    import pyjavaz._version
     from pyjavaz import JavaObject
-    from pyjavaz import bridge as Bridge  
+    if (pyjavaz._version.version_info[1] > 2 or 
+       pyjavaz._version.version_info[2] >= 1) :
+        from pyjavaz.bridge import Bridge #as Bridge
+    else: 
+        from pyjavaz import bridge as Bridge
+
 else: 
     from pycromanager import Bridge
 from itertools import product
@@ -43,15 +50,15 @@ class MMstack():
         '''Create a new stack backed by a store'''
         raise NotImplemented
 
-    def __init__(self,mmstore):
+    def __init__(self,mmstore,verbose):
         self._mmstore = mmstore
         self._builder = self._mmstudio.data().getCoordsBuilder()
         self._metadata = self._mmstore.getSummaryMetadata()
         self.channels = self._metadata.getChannelNameList()
         self.positions = self._metadata.getStagePositionList()
-        self.positions_names = [p.getLabel() for p in self._metadata.getStagePositionList()]
-        self.positions_coords = self._metadata.getStagePositionList()
-        self.dims = self._get_dims()
+        self.positions_names = [p.getLabel() for p in self.positions]
+        self.positions_coords = np.array( [ [p.getX(),p.getY(),p.getZ()] for p in self.positions])
+        self.dims = self._get_dims(verbose)
 
     def get_img(self,P:int = None,T:int = None, C:int = None, Z:int = None,unpack=True,ignore_err=False):
         '''Get image (with metadata!) at specified position, arguments
@@ -626,13 +633,13 @@ class MMpyreader():
         MMstack._set_core(self.core)
         # self.MMstack = MMstack
 
-    def load_folder(self,folder: str,virtual: bool = True) -> None:
+    def load_folder(self,folder: str,virtual: bool = True,verbose=True) -> None:
         if folder.endswith('ome.tif'):
             folder = path.dirname(folder)
         assert path.isdir(folder), f"{folder} doesn't exist"
         assert len(glob(path.join(folder,'*.ome.tif'))) >0, FileNotFoundError(f"No ome.tif file in {folder}")
         mmstore = self.mm.data().loadData(folder,virtual)
-        return MMstack(mmstore)
+        return MMstack(mmstore,verbose)
 
     def __enter__(self):
         return self
