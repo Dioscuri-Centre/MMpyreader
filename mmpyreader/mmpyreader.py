@@ -50,7 +50,7 @@ class MMstack():
         '''Create a new stack backed by a store'''
         raise NotImplemented
 
-    def __init__(self,mmstore,verbose):
+    def __init__(self,mmstore,verbose=True):
         self._mmstore = mmstore
         self._builder = self._mmstudio.data().getCoordsBuilder()
         self._metadata = self._mmstore.getSummaryMetadata()
