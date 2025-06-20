@@ -4,20 +4,20 @@
 import pycromanager
 import argparse
 from mmpyreader import mmpyreader
+from mmpyreader import product
 import os
 import shutil
 DEBUG = False
 #TODO example of usage 
 
-parser = argparse.ArgumentParser(description="""This program stitches multi well plates acquired with 
-                                                micro-manager""",
-                                 epilog="Example of usage:")
+parser = argparse.ArgumentParser(description="""This program is aimed at reslicing multi-d acquisiton acquired with micro-manager""")
+
+
 parser.add_argument("in_folder",help="the location of the micro-manager dataset ")
 parser.add_argument("out_folder",help="where you want the resulting stiched files to be")
 parser.add_argument("--channels",nargs="+",help="channels to keep, defaults to all")
-
 group = parser.add_mutually_exclusive_group()
-group.add_argument("--timepoints",nargs=2,help="timepoints to keep, defaults to all",type=int)
+group.add_argument('--timepoints',nargs='+',help='timepoints to process, defaults to all',type=int)
 group.add_argument("--timestep",help="only keep every n timepoints",type=int)
 parser.add_argument("--z",nargs="+",help="z positions to keep, defaults to all",type=int)
 parser.add_argument("--positions",nargs="+",help="positions to keep, defaults to all",type=int)
@@ -53,7 +53,17 @@ with mmpyreader.MMpyreader() as reader:
         print(f"Will only keep timepoints {args.timepoints}")
     else:
         print(f"Will keep all timepoints ({stack.dims['T']})")
-        
+
+    # Estimate memory required
+    mem_req = len(stack._get_coords_prod(                       P=args.positions,
+                        C=args.channels,
+                        T=timepoints,
+                        Z=args.z)[0])*stack.get_img(0,0,0,0)[0].nbytes
+    
+    if args.downscale != -1: 
+        mem_req /= args.downscale**2
+    print(f"Disk space required to save: {mem_req/(10**9)} GB")
+
     stack.save_substack(args.out_folder,
                         P=args.positions,
                         C=args.channels,

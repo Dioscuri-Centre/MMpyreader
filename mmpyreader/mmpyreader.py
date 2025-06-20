@@ -173,7 +173,7 @@ class MMstack():
         pixels = ip.getPixels().reshape(ip.getHeight(),-1)
         pixels = downscale_local_mean(pixels,(scale,scale)).astype(pixels.dtype)
         # remove extra pixel, if any
-        newdims = (ip.getHeight() // scale,ip.getHeight() // scale)
+        newdims = (ip.getHeight() // scale,ip.getWidth() // scale)
         pixels = pixels[:newdims[0],:newdims[1]]
         if pixels.dtype == np.uint16: #micro-manager doesn't like uint16, requires conversion
             pixels = pixels.astype(np.int16)
@@ -185,7 +185,8 @@ class MMstack():
         coords = mmimg.getCoords()
         assert ip.getNChannels() == 1 
         # NEED TO HAVE THE BYTESWAP FIX FOR ENDIANESS !!!!!!!
-        mmimg_n = datamanager.createImage(pixels.byteswap(inplace=True),newdims[0],newdims[1],
+        # width comes first for some reason ... 
+        mmimg_n = datamanager.createImage(pixels.byteswap(inplace=True),newdims[1],newdims[0],
                                           mmimg.getBytesPerPixel(),ip.getNChannels(),coords,meta)
         return mmimg_n
     
@@ -271,7 +272,7 @@ class MMstack():
             img = self.get_img(C=Co,P=Po,T=To,Z=Zo,unpack=False)
             if scale > 0:
                 img = self.downscale_img(img,scale) 
-
+            print(img.getHeight(),img.getWidth() )
             mmcordn = self._builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
             
             if repl_img is not None: 
@@ -481,6 +482,7 @@ class MMstack():
                     ts = T
                 for t in tqdm(ts,leave=False,desc='Timepoint completed'):
                     out_folder_t = os.path.join(out_folder,'T{}'.format(t))
+                    if os.path.exists(out_folder_t): continue
                     self.save_substack(out_folder_t,**opts,T = t,)
             else:
                 self.save_substack(out_folder,**opts,T = T)
