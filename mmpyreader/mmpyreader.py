@@ -653,9 +653,10 @@ def find_unique_wells(stack,verbose=False):
     import re
     import numpy as np
     
-    regex_grid = ['(.*?)-Pos(.*?)_(.*)','^{}-Pos(.*?)_(.*)','grid']
+    regex_grid = ['(.*?)-Pos(.*?)_(.*)','^{}-Pos(.*?)_(.*)','grid']  # old format for grid position names 
+    regex_grid_new =  ['(.*?)-(.*?)_(.*)','^{}-(.*?)_(.*)','grid_new'] # new format for grid position names
     regex_hcs =  ['(.*?)-Site_(.*?)', '^{}-Site_(.*?)','HCS']
-    for regex_match,regex_extract,gridtype in [regex_grid,regex_hcs]: 
+    for regex_match,regex_extract,gridtype in [regex_grid_new,regex_grid,regex_hcs]: 
         labs = [re.search(regex_match,e) for e in stack.positions_names ]
         # exclude labels which are not following the well pattern
         labs = [ lab for lab in labs if lab]
