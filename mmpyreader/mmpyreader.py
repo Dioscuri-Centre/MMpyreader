@@ -442,9 +442,122 @@ class MMstack():
         #I'd want the new stack to be returned but I'm not sure it's the proper way to deal with it
         #return newstack
 
+
+    @classmethod
+    def cat_stacks_position(cls,folder,stacks, T=None, C = None, Z = None,repl_img=None,split_pos=False,separate_meta=False,remove_z=False): 
+        ''' concatenate a series of stacks along position dimension '''
+        studio = cls._mmstudio
+        cb = studio.data().getCoordsBuilder()
+        stack0 = stacks[0]
+        n_positions = [s.dims['P'] for s in stacks]
+        pstart = np.cumsum([0]+n_positions).tolist()
+        time_ms = 0
+        tot_positions = sum(n_positions)
+        cdict = stack0._gen_coords(T= T ,P = np.arange(tot_positions), C = C, Z = Z)
+        coords_prod = dict_product(cdict) #cartesian product
+        Tl,Pl,Zl,Cl = cdict['T'], cdict['P'], cdict['Z'], cdict['C'] #keep list of positions
+
+        store = studio.data().createMultipageTIFFDatastore(os.path.abspath(folder),True,True)
+        smb = stack0._metadata.copyBuilder()
+        ndims = cb.z(len(Zl)).time(len(Tl)).channel(len(Cl)).stagePosition(len(Pl)).build()
+        smb = smb.intendedDimensions(ndims)
+
+        # Set positions
+        arraylist_pos = JavaObject('java.util.ArrayList')
+        for stack in stacks:
+            for p in stack.positions:
+                arraylist_pos.add(p)
+        smb = smb.stagePositions(arraylist_pos)
+         
+        # Set channels
+        arraylist_channels = JavaObject('java.util.ArrayList')
+        for c in Cl:
+            arraylist_channels.add(stack0.channels[c])
+        smb = smb.channelNames(arraylist_channels)
+
+        store.setSummaryMetadata(smb.build())
+        if repl_img is not None: 
+            img_np = repl_img# get image from input array 
+            height,width =  img_np.shape
+            bytes_per_pix = img_np.dtype.itemsize
+            num_components = 1
+            #metadata = img.getMetadata()
+            acceptable_dtypes = (np.uint16,np.int16,np.uint8,np.float32)
+            assert img_np.dtype in acceptable_dtypes, 'cannot process {img_np.dtype}'
+            
+            if img_np.dtype == np.uint16:
+                # the micro-manager function only takes short or byte arrays
+                img_np = img_np.astype(np.int16)
+            elif img_np.dtype == np.float32:
+                # need to create an array which would have the same byte representation
+                # but of the bytes/short type 
+                raise Exception("Micro-manager doesn't work with 32bits arrays")
+            
+            mmcoordn = cb.build()
+            meta_blank = studio.data().metadataBuilder().build()
+            blank = studio.data().createImage(img_np,
+                                            width,
+                                            height,
+                                            bytes_per_pix,
+                                            num_components,
+                                            mmcoordn,
+                                            meta_blank)
+            
+        pbar = tqdm(zip(stacks,pstart),total=len(stacks))
+        for cstack,t0 in pbar:
+            pbar.set_description("Processing « {} »".format(cstack._mmstore.getSummaryMetadata().getPrefix()))
+            coords_prod_new, dims = cstack._get_coords_prod(new=True, T = T, C = C, Z = Z)
+            first = True
+            for coord,coord_new in tqdm(zip(coords_prod,coords_prod_new),total=len(coords_prod_new),leave=False):
+                # there's a more elegant way to proceed by using the absolute time contained in the image but I'm too lazy to do it now
+                if first:
+                    tstart_ms = time_ms
+                    first = False
+                # old coordinates
+                To,Po,Zo,Co  = coord['T'], coord['P'],coord['Z'],coord['C'],
+                # new coordinates
+                Tn,Pn,Zn,Cn = coord['T'],coord_new['P']+t0,coord_new['Z'],coord_new['C']
+
+                if debug: print(f"{[Po,To,Co,Zo]}--->{[Pn,Tn,Cn,Zn]}")
+                img = cstack.get_img(C=Co,P=Po,T=To,Z=Zo,unpack=False,ignore_err=True)
+                mmcoordn = cstack._builder.z(Zn).time(Tn).channel(Cn).stagePosition(Pn).build()
+                if not img:
+                    if repl_img is not None:
+                        imgn = blank.coopyAtCoords(mmcoordn)
+                        #FIXME a bit overkill but I really want to be sure that the correct data is saved 
+                        print("put replacement image at coords {}".format(dict(C=Cn,P=Pn,T=Tn,Z=Zn)))
+                    else:
+                        print("skipped image at coords {}".format(dict(C=Cn,P=Pn,T=Tn,Z=Zn)))
+                        continue
+                else:
+                    metadata  = img.getMetadata()
+                    time_ms = metadata.getElapsedTimeMs()+tstart_ms
+                    mbuilder = metadata.copyBuilderPreservingUUID()
+                    metadata = mbuilder.elapsedTimeMs(time_ms).build()
+                    imgn = img.copyWith(mmcoordn,metadata)
+                    img._close()
+
+                    if remove_z:
+                        meta = imgn.getMetadata()
+                        meta_new = meta.copy()
+                        meta_new.zPositionUm(0.0)
+                        meta_new = meta_new.build()
+                        imgn2 = imgn.copyWithMetadata(meta_new)
+                        imgn._close()
+                        imgn = imgn2
+                
+                store.putImage(imgn)
+                imgn._close()
+
+        print(f"Concatenated {len(stacks)}, dimensions of new stack: ",end='')
+        store.freeze()
+        store.close()
+
+
     def split_and_save_wells(self,root_folder,T = None, C = None, Z = None,wells=None,
-                             grid=None,scale=-1,
-                             split_timepoints=False,separate_metadata=True,ignore_err=False): 
+                             grid=None,scale=-1,extract_atime=False,
+                             split_timepoints=False,separate_metadata=True,ignore_err=False):
+        import pandas as pd
         unique_wells = find_unique_wells(self,verbose=True)
 
         if(len(list(unique_wells))) == len(self.positions):
@@ -474,7 +587,23 @@ class MMstack():
                 #unique_wells = { well:pos[(len(pos) - ngrid**2)//2:(len(pos)+ngrid**2)//2] for well,pos in unique_wells.items() }
         for well,pos in tqdm(unique_wells.items(),desc='Well completed'):
             out_folder = os.path.join(root_folder,'well_{}'.format(well))
+            os.makedirs(out_folder,exist_ok=True)
             opts = dict(P=pos, C = C, Z = Z,progress=True,verbose=False,separate_meta=separate_metadata,scale=scale)
+            print('extacting date information for well {}'.format(well))
+            if extract_atime:
+                # extract time from first grid coordinate 
+                opts2 = opts.copy()
+                opts2['P'] = pos[0]
+
+                metadata = self.get_metadata(P=pos[0], C = C, Z = Z,ignore_err=ignore_err)
+                if metadata is None:
+                    raise Exception(f"Could not get metadata for well {well}, skipping")
+                atime = list(map(lambda x: x.getReceivedTime(),metadata.flatten()))
+                idx = np.arange(0,len(atime))
+                df = pd.DataFrame({'time':pd.to_datetime(atime)})
+                df.index.name = 'T'
+                df.to_csv(os.path.join(out_folder,'acq_time.dat'),sep=',')
+                
             if split_timepoints: 
                 if not T:
                     ts = range(self.dims['T'])
